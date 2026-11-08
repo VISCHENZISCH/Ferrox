@@ -1,0 +1,18 @@
+[package]
+name = "ferrox-desktop"
+description = "Ferrox : interface de bureau"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "ferrox"
+path = "src/main.rs"
+
+[dependencies]
+ferrox-core.workspace = true
+tokio.workspace = true
+anyhow.workspace = true
+tracing-subscriber.workspace = true
+time.workspace = true
+iced = { version = "=0.13.1", features = ["canvas", "svg", "tokio", "advanced"] }

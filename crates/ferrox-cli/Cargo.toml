@@ -1,0 +1,17 @@
+[package]
+name = "ferrox-cli"
+description = "Ferrox en mode service (sans interface)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "ferroxd"
+path = "src/main.rs"
+
+[dependencies]
+ferrox-core.workspace = true
+tokio.workspace = true
+anyhow.workspace = true
+tracing-subscriber.workspace = true
+serde_json.workspace = true

@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="93" height="28" viewBox="0 0 93 28" role="img" aria-label="Windows">
+  <rect width="93" height="28" rx="8" fill="#0078D4"/>
+  <g transform="translate(11 7) scale(0.5833)" fill="#FFFFFF"><path d="M0 0h11.4v11.4H0zM12.6 0H24v11.4H12.6zM0 12.6h11.4V24H0zM12.6 12.6H24V24H12.6z"/></g>
+  <text x="32" y="18.5" font-family="Manrope, Inter, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12.5" font-weight="600" fill="#FFFFFF">Windows</text>
+</svg>
