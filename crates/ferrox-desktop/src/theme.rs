@@ -18,7 +18,6 @@ pub const UI_HEAVY: Font = Font {
 };
 /// Données (domaines, adresses, chiffres) : même famille, pour une interface homogène.
 pub const MONO: Font = UI;
-pub const MONO_MED: Font = UI_BOLD;
 /// Extraits de commandes uniquement.
 pub const CODE: Font = Font::with_name("JetBrains Mono");
 
@@ -74,6 +73,7 @@ pub struct Pal {
     pub ok: Color,
     pub warn: Color,
     pub danger: Color,
+    #[allow(dead_code)]
     pub crit: Color,
 }
 
@@ -128,6 +128,8 @@ impl Pal {
         }
     }
 
+    /// Couleur par gravité, réservée aux vues d'alertes à venir.
+    #[allow(dead_code)]
     pub fn severity(&self, s: Severity) -> Color {
         match s {
             Severity::Low => self.faint,

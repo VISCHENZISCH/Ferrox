@@ -79,6 +79,32 @@ pub struct UpdateResult {
 
 const MAX_LIST_BYTES: usize = 64 * 1024 * 1024;
 
+/// Écrit une liste téléchargée seulement si elle contient des domaines,
+/// via un fichier temporaire renommé (l'ancienne liste reste valide en cas d'erreur).
+pub fn store_list(
+    dir: &std::path::Path,
+    name: &str,
+    body: &[u8],
+    parsed: usize,
+) -> std::io::Result<()> {
+    use std::io::Write;
+    if parsed == 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "aucun domaine reconnu : liste précédente conservée",
+        ));
+    }
+    let path = dir.join(format!("{name}.txt"));
+    let tmp = dir.join(format!("{name}.txt.tmp"));
+    let mut f = std::fs::File::create(&tmp)?;
+    f.write_all(body)?;
+    f.sync_all()?;
+    drop(f);
+    std::fs::rename(&tmp, &path).inspect_err(|_| {
+        let _ = std::fs::remove_file(&tmp);
+    })
+}
+
 /// Télécharge les listes activées et les écrit dans le dossier de données.
 pub async fn update_lists(cfg: &FilterConfig, paths: &Paths) -> Vec<UpdateResult> {
     crate::install_crypto_provider();
@@ -98,8 +124,10 @@ pub async fn update_lists(cfg: &FilterConfig, paths: &Paths) -> Vec<UpdateResult
             Ok(body) => {
                 let text = String::from_utf8_lossy(&body);
                 let n = parse_list(&text).len();
-                let path = dir.join(format!("{}.txt", safe_name(&src.name)));
-                match tokio::fs::write(&path, &body).await {
+                let (d, name) = (dir.clone(), safe_name(&src.name));
+                let stored =
+                    tokio::task::spawn_blocking(move || store_list(&d, &name, &body, n)).await;
+                match stored.unwrap_or_else(|e| Err(std::io::Error::other(e))) {
                     Ok(()) => UpdateResult {
                         name: src.name.clone(),
                         ok: true,
@@ -110,7 +138,11 @@ pub async fn update_lists(cfg: &FilterConfig, paths: &Paths) -> Vec<UpdateResult
                         name: src.name.clone(),
                         ok: false,
                         domains: 0,
-                        message: format!("écriture : {e}"),
+                        message: if e.kind() == std::io::ErrorKind::InvalidData {
+                            e.to_string()
+                        } else {
+                            format!("écriture : {e}")
+                        },
                     },
                 }
             }
@@ -129,6 +161,18 @@ pub async fn update_lists(cfg: &FilterConfig, paths: &Paths) -> Vec<UpdateResult
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn store_keeps_previous_list_when_empty() {
+        let dir = std::env::temp_dir().join(format!("ferrox-lists-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        store_list(&dir, "t", b"bad.com\n", 1).unwrap();
+        assert!(store_list(&dir, "t", b"<html>erreur</html>", 0).is_err());
+        let kept = std::fs::read_to_string(dir.join("t.txt")).unwrap();
+        assert_eq!(kept, "bad.com\n");
+        assert!(!dir.join("t.txt.tmp").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
     #[test]
     fn formats() {
         let t = "# c\n0.0.0.0 bad.com\n127.0.0.1 localhost\nplain.org\n||ads.net^\n||x.com/path\n! adblock\n*.wild.io\n1.2.3.4\nhttp://Evil.example:8080/a/b.exe\n";

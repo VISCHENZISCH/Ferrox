@@ -4,6 +4,7 @@
 //! - filtrage (listes de blocage, catégories, types de fichiers) ;
 //! - détection (balises C2, exfiltration, DNS anormal, User-Agent suspects).
 
+pub mod access;
 pub mod config;
 pub mod detect;
 pub mod dns;

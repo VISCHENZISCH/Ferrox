@@ -7,7 +7,7 @@ use serde_json::{json, Value};
 use std::fs::{File, OpenOptions};
 use std::io::{BufWriter, Write};
 use std::net::{SocketAddr, ToSocketAddrs, UdpSocket};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 
@@ -26,7 +26,7 @@ impl DailyFile {
         }
     }
 
-    fn write(&mut self, dir: &PathBuf, day: &str, line: &str) {
+    fn write(&mut self, dir: &Path, day: &str, line: &str) {
         if self.day != day || self.w.is_none() {
             if let Some(mut w) = self.w.take() {
                 let _ = w.flush();
@@ -198,8 +198,13 @@ fn ecs_event(ev: &Event) -> (Value, i64) {
     }
 }
 
+/// Score arrondi à deux décimales : 0.3 au lieu de 0.30000001192092896.
+fn round2(x: f32) -> f64 {
+    (f64::from(x) * 100.0).round() / 100.0
+}
+
 fn ecs_alert(a: &Alert) -> Value {
-    json!({
+    let mut doc = json!({
         "event": {
             "kind": "alert",
             "category": ["intrusion_detection", "network"],
@@ -215,8 +220,40 @@ fn ecs_alert(a: &Alert) -> Value {
         },
         "rule": { "name": a.kind, "description": a.kind.label() },
         "source": { "ip": a.client },
-        "destination": { "domain": a.target },
         "message": a.detail,
-        "ferrox": { "score": a.score, "severity": a.severity },
-    })
+        "ferrox": { "score": round2(a.score), "severity": a.severity },
+    });
+    // « * » désigne plusieurs destinations : pas de domaine à écrire.
+    if a.target != "*" {
+        doc["destination"] = json!({ "domain": a.target });
+    }
+    if let Some(ua) = &a.user_agent {
+        doc["user_agent"] = json!({ "original": ua });
+    }
+    doc
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::event::{AlertKind, Severity};
+
+    #[test]
+    fn alert_ecs_fields() {
+        let a = Alert {
+            id: 1,
+            ts: 1_700_000_000_000,
+            severity: Severity::Medium,
+            kind: AlertKind::SuspiciousUserAgent,
+            client: "10.0.0.2".parse().unwrap(),
+            target: "example.com".into(),
+            user_agent: Some("curl/8.0".into()),
+            detail: "outil".into(),
+            score: 0.3,
+        };
+        let d = ecs_alert(&a);
+        assert_eq!(d["destination"]["domain"], "example.com");
+        assert_eq!(d["user_agent"]["original"], "curl/8.0");
+        assert_eq!(d["ferrox"]["score"].to_string(), "0.3");
+    }
 }

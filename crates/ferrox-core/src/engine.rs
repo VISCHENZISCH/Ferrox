@@ -1,6 +1,7 @@
 //! Orchestration : démarre les écouteurs (proxy, DNS), le pipeline
 //! (statistiques, détection, journaux) et expose un instantané pour l'interface.
 
+use crate::access::{parse_allow, BasicAuth, BypassCache, Cidr};
 use crate::config::{Config, DetectConfig, FilterConfig, Paths};
 use crate::detect::Detector;
 use crate::dns::{self, DnsCtx};
@@ -11,7 +12,7 @@ use crate::proxy::{self, ProxyCtx};
 use crate::stats::{Snapshot, SnapshotOpts, Stats};
 use crate::tls::CertAuthority;
 use arc_swap::ArcSwap;
-use std::net::{SocketAddr, ToSocketAddrs};
+use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{sync_channel, RecvTimeoutError};
@@ -37,9 +38,62 @@ pub struct Engine {
 }
 
 fn resolve_addr(s: &str) -> anyhow::Result<SocketAddr> {
-    s.to_socket_addrs()?
+    s.to_socket_addrs()
+        .map_err(|e| anyhow::anyhow!("adresse invalide « {s} » : {e}"))?
         .next()
         .ok_or_else(|| anyhow::anyhow!("adresse invalide : {s}"))
+}
+
+/// Accepte `1.1.1.1`, `1.1.1.1:53`, `2606:4700::1111` et `[2606:4700::1111]:53`.
+pub fn parse_upstream(s: &str) -> Result<SocketAddr, String> {
+    let s = s.trim();
+    s.parse::<SocketAddr>()
+        .or_else(|_| s.parse::<IpAddr>().map(|ip| SocketAddr::new(ip, 53)))
+        .map_err(|_| format!("résolveur amont invalide : « {s} »"))
+}
+
+/// Vérifie la configuration sans rien ouvrir : adresses, réseaux autorisés, résolveurs.
+pub fn check_config(cfg: &Config) -> anyhow::Result<()> {
+    parse_allow(&cfg.proxy.allow, "proxy")?;
+    parse_allow(&cfg.dns.allow, "DNS")?;
+    if cfg.proxy.enabled {
+        resolve_addr(&cfg.proxy.listen)?;
+        for a in [&cfg.proxy.transparent_http, &cfg.proxy.transparent_https]
+            .into_iter()
+            .flatten()
+            .filter(|s| !s.is_empty())
+        {
+            resolve_addr(a)?;
+        }
+        if cfg.proxy.connect_ports.is_empty() {
+            tracing::warn!("proxy : aucun port CONNECT autorisé, le HTTPS explicite sera refusé");
+        }
+    }
+    if cfg.dns.enabled {
+        resolve_addr(&cfg.dns.listen)?;
+        let n = cfg
+            .dns
+            .upstreams
+            .iter()
+            .filter(|u| !u.trim().is_empty())
+            .map(|u| parse_upstream(u).map_err(anyhow::Error::msg))
+            .collect::<anyhow::Result<Vec<_>>>()?
+            .len();
+        if n == 0 {
+            anyhow::bail!("DNS : aucun résolveur amont configuré");
+        }
+    }
+    Ok(())
+}
+
+/// Prévient quand un écouteur ouvert sur toutes les interfaces accepte tout le monde.
+fn warn_exposure(what: &str, addr: SocketAddr, allow: &[Cidr]) {
+    if addr.ip().is_unspecified() && allow.iter().any(Cidr::is_any) {
+        tracing::warn!(
+            "{what} : écoute sur {addr} ouverte à tous les clients ; restreignez « allow » \
+             à vos réseaux"
+        );
+    }
 }
 
 impl Engine {
@@ -66,6 +120,24 @@ impl Engine {
             .thread_name("ferrox-io")
             .build()?;
 
+        let proxy_allow = parse_allow(&cfg.proxy.allow, "proxy")?;
+        let dns_allow = parse_allow(&cfg.dns.allow, "DNS")?;
+        let upstreams = cfg
+            .dns
+            .upstreams
+            .iter()
+            .filter(|u| !u.trim().is_empty())
+            .map(|u| parse_upstream(u))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| anyhow::anyhow!("DNS : {e}"))?;
+        if cfg.dns.enabled && upstreams.is_empty() {
+            anyhow::bail!("DNS : aucun résolveur amont configuré");
+        }
+        let auth = match &cfg.proxy.auth {
+            Some(a) if !a.user.is_empty() => Some(BasicAuth::new(&a.user, &a.password)),
+            _ => None,
+        };
+
         let mut listeners = Vec::new();
         rt.block_on(async {
             if cfg.proxy.enabled {
@@ -82,15 +154,28 @@ impl Engine {
                         .iter()
                         .map(|d| crate::filter::normalize_host(d))
                         .collect(),
-                    auto_bypass: Default::default(),
+                    auto_bypass: BypassCache::new(
+                        cfg.tls.auto_bypass_failures,
+                        Duration::from_secs(cfg.tls.auto_bypass_ttl_s.max(1)),
+                        10_000,
+                    ),
+                    allow: proxy_allow.clone(),
+                    connect_ports: cfg.proxy.connect_ports.clone(),
+                    auth,
+                    slots: Arc::new(tokio::sync::Semaphore::new(
+                        cfg.proxy.max_connections.max(1),
+                    )),
                     connect_timeout: Duration::from_millis(cfg.proxy.connect_timeout_ms),
+                    response_timeout: Duration::from_secs(cfg.proxy.response_timeout_s.max(1)),
                     idle_timeout: Duration::from_secs(cfg.proxy.idle_timeout_s.max(5)),
                     active: stats.active.clone(),
                 });
                 let l = TcpListener::bind(resolve_addr(&cfg.proxy.listen)?)
                     .await
                     .map_err(|e| anyhow::anyhow!("proxy {} : {e}", cfg.proxy.listen))?;
-                listeners.push(("Proxy explicite".into(), cfg.proxy.listen.clone()));
+                let a = l.local_addr()?;
+                warn_exposure("proxy", a, &proxy_allow);
+                listeners.push(("Proxy explicite".into(), a.to_string()));
                 tokio::spawn(proxy::run_explicit(l, ctx.clone()));
 
                 if let Some(addr) = cfg
@@ -102,7 +187,9 @@ impl Engine {
                     let l = TcpListener::bind(resolve_addr(addr)?)
                         .await
                         .map_err(|e| anyhow::anyhow!("transparent HTTP {addr} : {e}"))?;
-                    listeners.push(("Transparent HTTP".into(), addr.to_string()));
+                    let a = l.local_addr()?;
+                    warn_exposure("transparent HTTP", a, &proxy_allow);
+                    listeners.push(("Transparent HTTP".into(), a.to_string()));
                     tokio::spawn(proxy::run_transparent_http(l, ctx.clone()));
                 }
                 if let Some(addr) = cfg
@@ -114,40 +201,35 @@ impl Engine {
                     let l = TcpListener::bind(resolve_addr(addr)?)
                         .await
                         .map_err(|e| anyhow::anyhow!("transparent HTTPS {addr} : {e}"))?;
-                    listeners.push(("Transparent HTTPS".into(), addr.to_string()));
+                    let a = l.local_addr()?;
+                    warn_exposure("transparent HTTPS", a, &proxy_allow);
+                    listeners.push(("Transparent HTTPS".into(), a.to_string()));
                     tokio::spawn(proxy::run_transparent_https(l, ctx.clone()));
                 }
             }
             if cfg.dns.enabled {
-                let upstreams: Vec<SocketAddr> = cfg
-                    .dns
-                    .upstreams
-                    .iter()
-                    .filter_map(|u| {
-                        u.parse::<SocketAddr>()
-                            .ok()
-                            .or_else(|| format!("{u}:53").parse().ok())
-                    })
-                    .collect();
-                if upstreams.is_empty() {
-                    anyhow::bail!("DNS : aucun résolveur amont valide");
-                }
-                let ctx = Arc::new(DnsCtx::new(
-                    filter.clone(),
-                    sink.clone(),
-                    upstreams,
-                    cfg.dns.block_mode,
-                    cfg.dns.cache_entries.max(100),
-                    Duration::from_millis(cfg.dns.timeout_ms.max(200)),
-                ));
+                let ctx = Arc::new(
+                    DnsCtx::new(
+                        filter.clone(),
+                        sink.clone(),
+                        upstreams,
+                        cfg.dns.block_mode,
+                        cfg.dns.cache_entries.max(100),
+                        Duration::from_millis(cfg.dns.timeout_ms.max(200)),
+                    )
+                    .with_access(dns_allow.clone(), cfg.dns.max_tcp_clients),
+                );
                 let addr = resolve_addr(&cfg.dns.listen)?;
                 let udp = UdpSocket::bind(addr)
                     .await
                     .map_err(|e| anyhow::anyhow!("DNS UDP {} : {e}", cfg.dns.listen))?;
-                let tcp = TcpListener::bind(addr)
+                // Port 0 : TCP prend le même port que celui attribué à UDP.
+                let tcp_addr = udp.local_addr()?;
+                let tcp = TcpListener::bind(tcp_addr)
                     .await
                     .map_err(|e| anyhow::anyhow!("DNS TCP {} : {e}", cfg.dns.listen))?;
-                listeners.push(("DNS UDP/TCP".into(), cfg.dns.listen.clone()));
+                warn_exposure("DNS", tcp_addr, &dns_allow);
+                listeners.push(("DNS UDP/TCP".into(), tcp_addr.to_string()));
                 tokio::spawn(dns::run_udp(Arc::new(udp), ctx.clone()));
                 tokio::spawn(dns::run_tcp(tcp, ctx));
             }

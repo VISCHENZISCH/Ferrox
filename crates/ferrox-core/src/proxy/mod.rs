@@ -4,15 +4,15 @@
 pub mod body;
 pub mod sni;
 
+use crate::access::{client_allowed, connect_port_allowed, BasicAuth, BypassCache, Cidr};
 use crate::event::{now_ms, Action, Event, EventSink, HttpEvent, Scheme};
 use crate::filter::{normalize_host, BlockReason, Filter};
 use crate::http_client::{HttpsClient, ProxyBody};
 use crate::tls::CertAuthority;
 use body::{Counted, EventGuard, Prepend};
 use bytes::Bytes;
-use dashmap::DashSet;
 use http_body_util::{BodyExt, Full};
-use hyper::body::Incoming;
+use hyper::body::{Frame, Incoming};
 use hyper::header::{self, HeaderMap, HeaderName, HeaderValue};
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
@@ -25,6 +25,12 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::Semaphore;
+
+/// Octets de réponse inspectés pour reconnaître un type de fichier (ISO : 0x8001 + 5).
+const SNIFF_LEN: usize = 36 * 1024;
+/// Attente maximale pour réunir ces octets avant de relayer ce qui est arrivé.
+const SNIFF_WAIT: Duration = Duration::from_secs(3);
 
 pub struct ProxyCtx {
     pub filter: Arc<Filter>,
@@ -32,9 +38,21 @@ pub struct ProxyCtx {
     pub client: HttpsClient,
     pub ca: Option<Arc<CertAuthority>>,
     pub bypass: Vec<String>,
-    /// Hôtes dont la poignée de main interceptée a échoué (épinglage) : tunnel direct ensuite.
-    pub auto_bypass: DashSet<String>,
+    /// Hôtes dont la poignée de main interceptée échoue à répétition (épinglage) :
+    /// tunnel direct pendant un temps limité.
+    pub auto_bypass: BypassCache,
+    /// Réseaux clients autorisés ; les autres sont refusés dès l'acceptation.
+    pub allow: Vec<Cidr>,
+    /// Ports acceptés pour CONNECT.
+    pub connect_ports: Vec<u16>,
+    /// Authentification Basic du proxy explicite.
+    pub auth: Option<BasicAuth>,
+    /// Plafond de connexions clientes simultanées.
+    pub slots: Arc<Semaphore>,
     pub connect_timeout: Duration,
+    /// Attente des en-têtes de réponse amont.
+    pub response_timeout: Duration,
+    /// Inactivité maximale d'un tunnel.
     pub idle_timeout: Duration,
     pub active: Arc<AtomicU64>,
 }
@@ -43,7 +61,7 @@ impl ProxyCtx {
     fn should_mitm(&self, host: &str, port: u16) -> bool {
         self.ca.is_some()
             && matches!(port, 443 | 8443)
-            && !self.auto_bypass.contains(host)
+            && !self.auto_bypass.is_bypassed(host)
             && !self
                 .bypass
                 .iter()
@@ -102,10 +120,19 @@ where
     loop {
         match listener.accept().await {
             Ok((stream, peer)) => {
+                if !client_allowed(peer.ip(), &ctx.allow) {
+                    tracing::debug!("{peer} : client hors des réseaux autorisés, refusé");
+                    continue;
+                }
+                let Ok(permit) = ctx.slots.clone().try_acquire_owned() else {
+                    tracing::warn!("{peer} : plafond de connexions atteint, refusé");
+                    continue;
+                };
                 let _ = stream.set_nodelay(true);
                 let ctx = ctx.clone();
                 let f = f.clone();
                 tokio::spawn(async move {
+                    let _permit = permit;
                     let _g = ActiveGuard::new(&ctx.active);
                     f(stream, peer, ctx).await;
                 });
@@ -210,6 +237,18 @@ fn block_page(host: &str, r: &BlockReason) -> Response<ProxyBody> {
         .unwrap()
 }
 
+fn auth_required() -> Response<ProxyBody> {
+    Response::builder()
+        .status(StatusCode::PROXY_AUTHENTICATION_REQUIRED)
+        .header(
+            header::PROXY_AUTHENTICATE,
+            "Basic realm=\"Ferrox\", charset=\"UTF-8\"",
+        )
+        .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
+        .body(full("Ferrox : authentification requise\n"))
+        .unwrap()
+}
+
 fn simple(status: StatusCode, msg: &str) -> Response<ProxyBody> {
     Response::builder()
         .status(status)
@@ -272,6 +311,22 @@ async fn handle(
     ctx: Arc<ProxyCtx>,
     mode: Mode,
 ) -> Response<ProxyBody> {
+    // Authentification du proxy explicite (les requêtes interceptées l'ont déjà passée au CONNECT).
+    if let (Mode::Explicit, Some(auth)) = (&mode, &ctx.auth) {
+        let h = req.headers().get(header::PROXY_AUTHORIZATION);
+        if !auth.check(h.map(HeaderValue::as_bytes)) {
+            let mut ev = base_event(client, req.method().as_str(), Scheme::Http, "", 0);
+            if let Some(a) = req.uri().authority() {
+                let (h, p) = split_authority(a.as_str(), 80);
+                ev.host = h;
+                ev.port = p;
+            }
+            ev.reason = Some("authentification proxy refusée".into());
+            ev.action = Action::Block;
+            emit_now(&ctx, ev, 407, None, Instant::now());
+            return auth_required();
+        }
+    }
     if req.method() == Method::CONNECT {
         return match mode {
             Mode::Explicit => connect(req, client, ctx).await,
@@ -359,24 +414,24 @@ async fn handle(
     let down = Arc::new(AtomicU64::new(0));
     let upstream_req = Request::from_parts(parts, Counted::new(body, up.clone(), None).boxed());
 
-    let resp = match tokio::time::timeout(ctx.idle_timeout, ctx.client.request(upstream_req)).await
-    {
-        Ok(Ok(r)) => r,
-        Ok(Err(e)) => {
-            ev.reason = Some(format!("amont : {e}"));
-            ev.bytes_up = header_up + up.load(Ordering::Relaxed);
-            emit_now(&ctx, ev, 502, None, start);
-            return simple(
-                StatusCode::BAD_GATEWAY,
-                "Ferrox : serveur amont injoignable",
-            );
-        }
-        Err(_) => {
-            ev.reason = Some("amont : délai dépassé".into());
-            emit_now(&ctx, ev, 504, None, start);
-            return simple(StatusCode::GATEWAY_TIMEOUT, "Ferrox : délai dépassé");
-        }
-    };
+    let resp =
+        match tokio::time::timeout(ctx.response_timeout, ctx.client.request(upstream_req)).await {
+            Ok(Ok(r)) => r,
+            Ok(Err(e)) => {
+                ev.reason = Some(format!("amont : {e}"));
+                ev.bytes_up = header_up + up.load(Ordering::Relaxed);
+                emit_now(&ctx, ev, 502, None, start);
+                return simple(
+                    StatusCode::BAD_GATEWAY,
+                    "Ferrox : serveur amont injoignable",
+                );
+            }
+            Err(_) => {
+                ev.reason = Some("amont : délai dépassé".into());
+                emit_now(&ctx, ev, 504, None, start);
+                return simple(StatusCode::GATEWAY_TIMEOUT, "Ferrox : délai dépassé");
+            }
+        };
 
     let (mut rparts, rbody) = resp.into_parts();
     ev.status = rparts.status.as_u16();
@@ -389,26 +444,28 @@ async fn handle(
         }
     }
 
-    // Inspection de la signature du fichier sur la première trame.
+    // Inspection de la signature du fichier sur les premiers Kio (décompressés si besoin).
     let mut rbody = rbody;
-    let mut first = None;
+    let mut first = Vec::new();
     if filter.wants_sniff() && rparts.status.is_success() {
-        match rbody.frame().await {
-            Some(Ok(frame)) => {
-                if let Some(d) = frame.data_ref() {
-                    if let Some(r) = filter.check_magic(d) {
-                        emit_now(&ctx, ev, 403, Some(&r), start);
-                        return block_page(&host, &r);
-                    }
+        match read_head(&mut rbody, &mut first).await {
+            Ok(head) => {
+                let enc = header_str(&rparts.headers, header::CONTENT_ENCODING);
+                let decoded = decoded_head(enc.as_deref(), &head);
+                let hit = decoded
+                    .as_deref()
+                    .and_then(|d| filter.check_magic(d))
+                    .or_else(|| filter.check_magic(&head));
+                if let Some(r) = hit {
+                    emit_now(&ctx, ev, 403, Some(&r), start);
+                    return block_page(&host, &r);
                 }
-                first = Some(frame);
             }
-            Some(Err(e)) => {
+            Err(e) => {
                 ev.reason = Some(format!("amont : {e}"));
                 emit_now(&ctx, ev, 502, None, start);
                 return simple(StatusCode::BAD_GATEWAY, "Ferrox : réponse amont invalide");
             }
-            None => {}
         }
     }
     drop(filter);
@@ -426,6 +483,49 @@ async fn handle(
     Response::from_parts(rparts, body)
 }
 
+/// Lit les premières trames de la réponse, jusqu'à `SNIFF_LEN` octets ou `SNIFF_WAIT`.
+/// Les trames lues sont rendues dans `frames` pour être relayées telles quelles.
+async fn read_head(
+    body: &mut Incoming,
+    frames: &mut Vec<Frame<Bytes>>,
+) -> Result<Vec<u8>, hyper::Error> {
+    let mut head = Vec::new();
+    let deadline = tokio::time::Instant::now() + SNIFF_WAIT;
+    while head.len() < SNIFF_LEN {
+        match tokio::time::timeout_at(deadline, body.frame()).await {
+            Err(_) | Ok(None) => break,
+            Ok(Some(Err(e))) => return Err(e),
+            Ok(Some(Ok(f))) => {
+                let data = f.is_data();
+                if let Some(d) = f.data_ref() {
+                    let take = d.len().min(SNIFF_LEN - head.len());
+                    head.extend_from_slice(&d[..take]);
+                }
+                frames.push(f);
+                if !data {
+                    break;
+                }
+            }
+        }
+    }
+    Ok(head)
+}
+
+/// Décompresse le début d'un corps gzip ou deflate (lecture partielle acceptée).
+fn decoded_head(encoding: Option<&str>, raw: &[u8]) -> Option<Vec<u8>> {
+    use std::io::Read;
+    let enc = encoding?.trim().to_ascii_lowercase();
+    let reader: Box<dyn Read + '_> = match enc.as_str() {
+        "gzip" | "x-gzip" => Box::new(flate2::read::GzDecoder::new(raw)),
+        "deflate" => Box::new(flate2::read::ZlibDecoder::new(raw)),
+        _ => return None,
+    };
+    let mut out = Vec::with_capacity(SNIFF_LEN);
+    // Un flux tronqué renvoie une erreur, mais les octets déjà décodés restent dans `out`.
+    let _ = reader.take(SNIFF_LEN as u64).read_to_end(&mut out);
+    (!out.is_empty()).then_some(out)
+}
+
 // ---------------------------------------------------------------- CONNECT
 
 async fn connect(
@@ -440,6 +540,18 @@ async fn connect(
     let (host, port) = split_authority(&auth, 443);
     let mut ev = base_event(client, "CONNECT", Scheme::Tunnel, &host, port);
     ev.user_agent = header_str(req.headers(), header::USER_AGENT);
+
+    if !connect_port_allowed(port, &ctx.connect_ports) {
+        let r = BlockReason {
+            reason: format!("port CONNECT {port} non autorisé"),
+            category: "policy".into(),
+        };
+        emit_now(&ctx, ev, 403, Some(&r), start);
+        return simple(
+            StatusCode::FORBIDDEN,
+            "Ferrox : port de destination non autorisé pour CONNECT",
+        );
+    }
 
     if let Some(r) = ctx.filter.load().check_domain(&host) {
         emit_now(&ctx, ev, 403, Some(&r), start);
@@ -487,8 +599,8 @@ async fn connect(
 
 /// Relaie deux flux et émet l'événement de tunnel à la fermeture.
 async fn splice<A>(
-    mut a: A,
-    mut b: TcpStream,
+    a: A,
+    b: TcpStream,
     mut ev: HttpEvent,
     status: u16,
     start: Instant,
@@ -496,12 +608,44 @@ async fn splice<A>(
 ) where
     A: AsyncRead + AsyncWrite + Unpin,
 {
-    let (up, down) = tokio::io::copy_bidirectional(&mut a, &mut b)
-        .await
-        .unwrap_or((0, 0));
+    let (up, down) = splice_idle(a, b, ctx.idle_timeout).await;
     ev.bytes_up += up;
     ev.bytes_down += down;
     emit_now(ctx, ev, status, None, start);
+}
+
+/// Copie un sens du tunnel ; s'arrête après `idle` sans aucun octet reçu.
+async fn pipe<R, W>(mut r: R, mut w: W, idle: Duration) -> u64
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + Unpin,
+{
+    let mut buf = vec![0u8; 16 * 1024];
+    let mut total = 0u64;
+    loop {
+        let n = match tokio::time::timeout(idle, r.read(&mut buf)).await {
+            Ok(Ok(n)) if n > 0 => n,
+            // Fin de flux, erreur ou inactivité trop longue.
+            _ => break,
+        };
+        if w.write_all(&buf[..n]).await.is_err() {
+            break;
+        }
+        total += n as u64;
+    }
+    let _ = w.shutdown().await;
+    total
+}
+
+/// Remplace `copy_bidirectional` avec un délai d'inactivité : renvoie (montant, descendant).
+pub async fn splice_idle<A, B>(a: A, b: B, idle: Duration) -> (u64, u64)
+where
+    A: AsyncRead + AsyncWrite + Unpin,
+    B: AsyncRead + AsyncWrite + Unpin,
+{
+    let (ar, aw) = tokio::io::split(a);
+    let (br, bw) = tokio::io::split(b);
+    tokio::join!(pipe(ar, bw, idle), pipe(br, aw, idle))
 }
 
 type BoxFut = std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>;
@@ -533,12 +677,13 @@ where
                 serve_http(tls, client, ctx, Mode::Mitm { host: sni, port }).await;
             }
             other => {
-                // Certificat refusé (épinglage, CA non installée) : tunnel direct la prochaine fois.
+                // Certificat refusé (épinglage, CA non installée) : après plusieurs échecs,
+                // tunnel direct pour un temps limité.
                 let msg = match other {
                     Ok(Err(e)) => format!("interception refusée : {e}"),
                     _ => "interception : délai dépassé".into(),
                 };
-                ctx.auto_bypass.insert(host.clone());
+                ctx.auto_bypass.record_failure(&host);
                 let mut ev = ev;
                 ev.reason = Some(msg);
                 emit_now(&ctx, ev, 525, None, start);
@@ -617,5 +762,27 @@ mod tests {
             ("example.com".into(), 80)
         );
         assert_eq!(split_authority("[::1]:8080", 80), ("::1".into(), 8080));
+    }
+
+    #[test]
+    fn sniff_sees_compressed_and_deep_signatures() {
+        use std::io::Write;
+        // Exécutable servi en gzip, flux tronqué : le début décompressé suffit.
+        let mut payload = b"MZ\x90\x00".to_vec();
+        payload.extend(std::iter::repeat_n(7u8, 100_000));
+        let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        enc.write_all(&payload).unwrap();
+        let gz = enc.finish().unwrap();
+        let head = decoded_head(Some("gzip"), &gz[..gz.len() / 2]).unwrap();
+        assert!(head.starts_with(b"MZ"));
+        assert!(head.len() <= SNIFF_LEN);
+        assert!(decoded_head(Some("br"), &gz).is_none());
+        // Image ISO : signature à 0x8001, dans la fenêtre inspectée.
+        let mut iso = vec![0u8; SNIFF_LEN];
+        iso[0x8001..0x8006].copy_from_slice(b"CD001");
+        assert_eq!(
+            crate::filter::magic::detect(&iso),
+            Some(crate::filter::magic::Kind::Iso)
+        );
     }
 }

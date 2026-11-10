@@ -3,7 +3,7 @@
 use crate::icons::Brand;
 use crate::theme::Pal;
 use ferrox_core::config::DnsBlockMode;
-use ferrox_core::event::{now_ms, Severity};
+use ferrox_core::event::now_ms;
 use ferrox_core::filter::lists::UpdateResult;
 use ferrox_core::{Config, Engine, Paths, Snapshot, SnapshotOpts};
 use iced::{Subscription, Task, Theme};
@@ -43,6 +43,11 @@ pub enum Field {
     WindowMb,
     Entropy,
     CategoriesDir,
+    ProxyAllow,
+    DnsAllow,
+    ConnectPorts,
+    AuthUser,
+    AuthPassword,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -78,7 +83,6 @@ pub enum Message {
     TrafficFilter(ActionFilter),
     DnsQuery(String),
     DnsFilter(ActionFilter),
-    AlertFilter(Option<Severity>),
     Input(ListKind, String),
     AddItem(ListKind),
     RemoveItem(ListKind, usize),
@@ -106,6 +110,8 @@ pub enum ToastKind {
 
 pub struct Toast {
     pub text: String,
+    /// Gardé pour un style par type ; l'interface monochrome ne le distingue pas encore.
+    #[allow(dead_code)]
     pub kind: ToastKind,
     pub at: Instant,
 }
@@ -127,6 +133,11 @@ pub struct Form {
     pub window_mb: String,
     pub entropy: String,
     pub categories_dir: String,
+    pub proxy_allow: String,
+    pub dns_allow: String,
+    pub connect_ports: String,
+    pub auth_user: String,
+    pub auth_password: String,
 }
 
 impl Form {
@@ -155,6 +166,27 @@ impl Form {
                 .categories_dir
                 .as_ref()
                 .map(|p| p.display().to_string())
+                .unwrap_or_default(),
+            proxy_allow: c.proxy.allow.join(", "),
+            dns_allow: c.dns.allow.join(", "),
+            connect_ports: c
+                .proxy
+                .connect_ports
+                .iter()
+                .map(u16::to_string)
+                .collect::<Vec<_>>()
+                .join(", "),
+            auth_user: c
+                .proxy
+                .auth
+                .as_ref()
+                .map(|a| a.user.clone())
+                .unwrap_or_default(),
+            auth_password: c
+                .proxy
+                .auth
+                .as_ref()
+                .map(|a| a.password.clone())
                 .unwrap_or_default(),
         }
     }
@@ -198,6 +230,45 @@ impl Form {
         c.dns.upstreams = list(&self.upstreams);
         if c.dns.upstreams.is_empty() {
             errs.push("au moins un résolveur DNS amont est nécessaire".into());
+        }
+        for u in &c.dns.upstreams {
+            if let Err(e) = ferrox_core::engine::parse_upstream(u) {
+                errs.push(e);
+            }
+        }
+        for (name, raw, dst) in [
+            ("proxy", &self.proxy_allow, &mut c.proxy.allow),
+            ("DNS", &self.dns_allow, &mut c.dns.allow),
+        ] {
+            let v = list(raw);
+            for n in &v {
+                if ferrox_core::access::Cidr::parse(n).is_none() {
+                    errs.push(format!(
+                        "réseau autorisé {name} invalide : « {n} » (ex. 192.168.1.0/24)"
+                    ));
+                }
+            }
+            *dst = if v.is_empty() {
+                ferrox_core::config::default_allow()
+            } else {
+                v
+            };
+        }
+        let mut ports = Vec::new();
+        for p in list(&self.connect_ports) {
+            match p.parse::<u16>() {
+                Ok(n) if n > 0 => ports.push(n),
+                _ => errs.push(format!("port CONNECT invalide : « {p} »")),
+            }
+        }
+        c.proxy.connect_ports = ports;
+        let user = self.auth_user.trim();
+        c.proxy.auth = (!user.is_empty()).then(|| ferrox_core::config::ProxyAuth {
+            user: user.to_string(),
+            password: self.auth_password.clone(),
+        });
+        if user.contains(':') {
+            errs.push("identifiant proxy : le caractère « : » est interdit".into());
         }
         c.tls.bypass = list(&self.bypass);
         c.log.dir = opt(&self.log_dir).map(PathBuf::from);
@@ -251,7 +322,6 @@ pub struct App {
     pub traffic_filter: ActionFilter,
     pub dns_query: String,
     pub dns_filter: ActionFilter,
-    pub alert_filter: Option<Severity>,
     pub alerts_cleared_at: u64,
     pub inputs: [String; 4],
     pub list_status: Vec<UpdateResult>,
@@ -312,7 +382,6 @@ impl App {
             traffic_filter: ActionFilter::All,
             dns_query: String::new(),
             dns_filter: ActionFilter::All,
-            alert_filter: None,
             alerts_cleared_at: 0,
             inputs: Default::default(),
             list_status: Vec::new(),
@@ -505,7 +574,6 @@ impl App {
             Message::TrafficFilter(f) => self.traffic_filter = f,
             Message::DnsQuery(q) => self.dns_query = q,
             Message::DnsFilter(f) => self.dns_filter = f,
-            Message::AlertFilter(f) => self.alert_filter = f,
             Message::ClearAlerts => {
                 self.alerts_cleared_at = self.snap.alerts.last().map(|a| a.id).unwrap_or(0);
             }
@@ -613,6 +681,11 @@ impl App {
                     Field::WindowMb => &mut s.window_mb,
                     Field::Entropy => &mut s.entropy,
                     Field::CategoriesDir => &mut s.categories_dir,
+                    Field::ProxyAllow => &mut s.proxy_allow,
+                    Field::DnsAllow => &mut s.dns_allow,
+                    Field::ConnectPorts => &mut s.connect_ports,
+                    Field::AuthUser => &mut s.auth_user,
+                    Field::AuthPassword => &mut s.auth_password,
                 } = v;
             }
             Message::Flag(t, v) => match t {
@@ -633,6 +706,7 @@ impl App {
                     self.notify(errs.join(" · "), ToastKind::Error);
                     return Task::none();
                 }
+                let restart = self.config.restart_needed(&next);
                 self.config = next;
                 self.draft.proxy = self.config.proxy.clone();
                 self.draft.dns = self.config.dns.clone();
@@ -641,9 +715,22 @@ impl App {
                 self.draft.log = self.config.log.clone();
                 self.draft.filter.categories_dir = self.config.filter.categories_dir.clone();
                 if self.save_config() {
-                    self.start_engine();
-                    if self.engine.is_some() {
-                        self.notify("Paramètres enregistrés, moteur redémarré", ToastKind::Ok);
+                    match &self.engine {
+                        // Seuils de détection seulement : appliqués à chaud, statistiques conservées.
+                        Some(engine) if !restart => {
+                            engine.set_detect_config(self.config.detect.clone());
+                            self.notify("Paramètres enregistrés et appliqués", ToastKind::Ok);
+                        }
+                        Some(_) => {
+                            self.start_engine();
+                            if self.engine.is_some() {
+                                self.notify(
+                                    "Paramètres enregistrés, moteur redémarré",
+                                    ToastKind::Ok,
+                                );
+                            }
+                        }
+                        None => self.notify("Paramètres enregistrés", ToastKind::Ok),
                     }
                 }
             }

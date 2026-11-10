@@ -3,10 +3,11 @@ resolver = "2"
 members = ["crates/ferrox-core", "crates/ferrox-cli", "crates/ferrox-desktop"]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 license = "MIT"
-authors = ["Ferrox contributors"]
+authors = ["VISCHENZISCH"]
+repository = "https://github.com/VISCHENZISCH/Ferrox"
 
 [workspace.dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "time", "sync", "macros", "fs", "signal"] }
@@ -33,6 +34,8 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 anyhow = "1"
 thiserror = "2"
+base64 = "0.22"
+flate2 = "1"
 ferrox-core = { path = "crates/ferrox-core" }
 
 # Profils légers : pas d'infos de debug (disque limité), dépendances optimisées.
@@ -49,4 +52,6 @@ opt-level = 3
 lto = "thin"
 codegen-units = 1
 strip = true
-panic = "abort"
+# « unwind » : une panique dans une tâche réseau ne tue plus tout le service (C-18).
+panic = "unwind"
+overflow-checks = true

@@ -77,15 +77,18 @@ where
     }
 }
 
-/// Réinjecte une première trame déjà lue (après inspection de signature).
+/// Réinjecte les premières trames déjà lues (après inspection de signature).
 pub struct Prepend<B> {
-    first: Option<Frame<Bytes>>,
+    first: std::collections::VecDeque<Frame<Bytes>>,
     inner: B,
 }
 
 impl<B> Prepend<B> {
-    pub fn new(first: Option<Frame<Bytes>>, inner: B) -> Self {
-        Self { first, inner }
+    pub fn new(first: Vec<Frame<Bytes>>, inner: B) -> Self {
+        Self {
+            first: first.into(),
+            inner,
+        }
     }
 }
 
@@ -101,13 +104,13 @@ where
         cx: &mut Context<'_>,
     ) -> Poll<Option<Result<Frame<Bytes>, Self::Error>>> {
         let this = self.get_mut();
-        if let Some(f) = this.first.take() {
+        if let Some(f) = this.first.pop_front() {
             return Poll::Ready(Some(Ok(f)));
         }
         Pin::new(&mut this.inner).poll_frame(cx)
     }
 
     fn is_end_stream(&self) -> bool {
-        self.first.is_none() && self.inner.is_end_stream()
+        self.first.is_empty() && self.inner.is_end_stream()
     }
 }

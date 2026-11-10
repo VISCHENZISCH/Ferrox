@@ -1077,7 +1077,7 @@ dependencies = [
 
 [[package]]
 name = "ferrox-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "ferrox-core",
@@ -1088,13 +1088,15 @@ dependencies = [
 
 [[package]]
 name = "ferrox-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "arc-swap",
+ "base64",
  "bytes",
  "dashmap",
  "directories",
+ "flate2",
  "hickory-proto",
  "http",
  "http-body-util",
@@ -1117,7 +1119,7 @@ dependencies = [
 
 [[package]]
 name = "ferrox-desktop"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "ferrox-core",

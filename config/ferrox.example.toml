@@ -1,8 +1,22 @@
 [proxy]
 enabled = true
 listen = "127.0.0.1:3128"
+# Réseaux clients autorisés (CIDR). Ajoutez votre réseau local pour servir de passerelle,
+# par exemple "192.168.1.0/24". "0.0.0.0/0" ouvre le proxy à tous : à éviter.
+allow = ["127.0.0.0/8", "::1/128"]
+# Ports de destination acceptés pour CONNECT (HTTPS).
+connect_ports = [443, 8443]
+max_connections = 4096
 connect_timeout_ms = 8000
+# Attente des en-têtes de réponse du serveur amont.
+response_timeout_s = 60
+# Inactivité maximale d'un tunnel avant fermeture.
 idle_timeout_s = 300
+
+# Authentification Basic du proxy explicite (facultative) :
+# [proxy.auth]
+# user = "ferrox"
+# password = "changez-moi"
 
 [dns]
 enabled = true
@@ -14,9 +28,15 @@ upstreams = [
 block_mode = "nxdomain"
 cache_entries = 20000
 timeout_ms = 2000
+# Réseaux clients autorisés. Un résolveur ouvert sert aux attaques par amplification.
+allow = ["127.0.0.0/8", "::1/128"]
+max_tcp_clients = 256
 
 [tls]
 mitm = false
+# Après 3 échecs de poignée de main interceptée, l'hôte passe en tunnel direct pendant 1 h.
+auto_bypass_failures = 3
+auto_bypass_ttl_s = 3600
 bypass = [
     "apple.com",
     "icloud.com",

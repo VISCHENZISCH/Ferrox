@@ -1,0 +1,45 @@
+# Unité systemd pour ferroxd.
+# Installation :
+#   sudo install -m 0755 ferroxd /usr/local/bin/ferroxd
+#   sudo install -d -o ferrox -g ferrox /etc/ferrox /var/lib/ferrox
+#   sudo useradd --system --home /var/lib/ferrox --shell /usr/sbin/nologin ferrox
+#   sudo -u ferrox ferroxd init -c /etc/ferrox/config.toml
+#   sudo install -m 0644 ferroxd.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now ferroxd
+
+[Unit]
+Description=Ferrox : proxy web et DNS de surveillance
+Documentation=https://github.com/VISCHENZISCH/Ferrox
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ferrox
+Group=ferrox
+Environment=XDG_DATA_HOME=/var/lib
+Environment=RUST_LOG=warn
+ExecStart=/usr/local/bin/ferroxd run -c /etc/ferrox/config.toml
+Restart=on-failure
+RestartSec=2
+# Écoute sur le port 53 ou 80 sans être root.
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/ferrox /etc/ferrox
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

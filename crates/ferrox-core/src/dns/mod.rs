@@ -1,10 +1,11 @@
 //! Serveur DNS intégré : filtrage, cache, relais vers les résolveurs amont (UDP et TCP).
 
+use crate::access::{client_allowed, Cidr};
 use crate::config::DnsBlockMode;
 use crate::event::{now_ms, Action, DnsEvent, Event, EventSink};
 use crate::filter::{normalize_host, Filter};
 use dashmap::DashMap;
-use hickory_proto::op::{Message, MessageType, ResponseCode};
+use hickory_proto::op::{Message, MessageType, Query, ResponseCode};
 use hickory_proto::rr::rdata::{A, AAAA};
 use hickory_proto::rr::{RData, Record, RecordType};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
@@ -12,6 +13,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
+use tokio::sync::Semaphore;
+
+/// Délai pour lire un message DNS complet sur TCP (RFC 7766).
+const TCP_READ_TIMEOUT: Duration = Duration::from_secs(10);
 
 struct CacheEntry {
     bytes: Vec<u8>,
@@ -27,6 +32,10 @@ pub struct DnsCtx {
     pub block_mode: DnsBlockMode,
     pub cache_max: usize,
     pub timeout: Duration,
+    /// Réseaux clients autorisés (résolveur ouvert sinon : amplification).
+    pub allow: Vec<Cidr>,
+    /// Plafond de connexions TCP simultanées.
+    pub max_tcp_clients: usize,
     cache: DashMap<(Box<str>, u16), CacheEntry>,
 }
 
@@ -46,8 +55,18 @@ impl DnsCtx {
             block_mode,
             cache_max,
             timeout,
+            allow: crate::access::loopback(),
+            max_tcp_clients: 256,
             cache: DashMap::new(),
         }
+    }
+
+    /// Réseaux autorisés et plafond TCP.
+    #[must_use]
+    pub fn with_access(mut self, allow: Vec<Cidr>, max_tcp_clients: usize) -> Self {
+        self.allow = allow;
+        self.max_tcp_clients = max_tcp_clients.max(1);
+        self
     }
 }
 
@@ -78,6 +97,10 @@ pub async fn run_udp(sock: Arc<UdpSocket>, ctx: Arc<DnsCtx>) {
                 continue;
             }
         };
+        if !client_allowed(peer.ip(), &ctx.allow) {
+            // Aucune réponse : un refus explicite servirait encore à l'amplification.
+            continue;
+        }
         let pkt = buf[..n].to_vec();
         let sock = sock.clone();
         let ctx = ctx.clone();
@@ -89,23 +112,37 @@ pub async fn run_udp(sock: Arc<UdpSocket>, ctx: Arc<DnsCtx>) {
     }
 }
 
+/// Lit un message DNS sur TCP avec un délai sur toute la lecture (longueur et contenu).
+async fn read_msg(stream: &mut TcpStream) -> Option<Vec<u8>> {
+    let fut = async {
+        let len = stream.read_u16().await.ok()? as usize;
+        let mut pkt = vec![0u8; len];
+        stream.read_exact(&mut pkt).await.ok()?;
+        Some(pkt)
+    };
+    tokio::time::timeout(TCP_READ_TIMEOUT, fut)
+        .await
+        .ok()
+        .flatten()
+}
+
 pub async fn run_tcp(listener: TcpListener, ctx: Arc<DnsCtx>) {
+    let slots = Arc::new(Semaphore::new(ctx.max_tcp_clients));
     loop {
         let Ok((mut stream, peer)) = listener.accept().await else {
+            tokio::time::sleep(Duration::from_millis(20)).await;
             continue;
+        };
+        if !client_allowed(peer.ip(), &ctx.allow) {
+            continue;
+        }
+        let Ok(permit) = slots.clone().try_acquire_owned() else {
+            continue; // trop de connexions : la nouvelle est fermée
         };
         let ctx = ctx.clone();
         tokio::spawn(async move {
-            loop {
-                let len =
-                    match tokio::time::timeout(Duration::from_secs(10), stream.read_u16()).await {
-                        Ok(Ok(l)) => l as usize,
-                        _ => return,
-                    };
-                let mut pkt = vec![0u8; len];
-                if stream.read_exact(&mut pkt).await.is_err() {
-                    return;
-                }
+            let _permit = permit;
+            while let Some(pkt) = read_msg(&mut stream).await {
                 if let Some(resp) = resolve(&pkt, peer.ip(), &ctx, Transport::Tcp).await {
                     let mut out = Vec::with_capacity(resp.len() + 2);
                     out.extend_from_slice(&(resp.len() as u16).to_be_bytes());
@@ -190,10 +227,26 @@ async fn resolve(
         return m.to_vec().ok();
     }
 
+    // Taille de réponse acceptée par le client en UDP (512, ou annoncée par EDNS).
+    let udp_limit = req
+        .extensions()
+        .as_ref()
+        .map_or(512, |e| usize::from(e.max_payload()))
+        .max(512);
+
     // Cache.
     let key = (qname.clone().into_boxed_str(), u16::from(qtype));
     if let Some(e) = ctx.cache.get(&key) {
         if e.expires > Instant::now() {
+            if transport == Transport::Udp && e.bytes.len() > udp_limit {
+                // Réponse obtenue en TCP, trop grande pour ce client : TC=1, il réessaiera en TCP.
+                drop(e);
+                let mut m = reply_base(&req);
+                m.set_truncated(true);
+                ev.cached = true;
+                finish(ev, ResponseCode::NoError, 0);
+                return m.to_vec().ok();
+            }
             let mut b = e.bytes.clone();
             b[0] = pkt[0];
             b[1] = pkt[1];
@@ -209,7 +262,7 @@ async fn resolve(
     let mut resp = None;
     for up in &ctx.upstreams {
         let r = match transport {
-            Transport::Udp => forward_udp(pkt, *up, ctx.timeout).await,
+            Transport::Udp => forward_udp(pkt, req.queries(), *up, ctx.timeout).await,
             Transport::Tcp => forward_tcp(pkt, *up, ctx.timeout).await,
         };
         if let Ok(r) = r {
@@ -265,7 +318,19 @@ async fn resolve(
     Some(bytes)
 }
 
-async fn forward_udp(pkt: &[u8], up: SocketAddr, timeout: Duration) -> std::io::Result<Vec<u8>> {
+/// Vrai si la réponse porte le même identifiant et la même question que la requête.
+fn matches_query(resp: &[u8], id: &[u8], queries: &[Query]) -> bool {
+    resp.len() >= 12
+        && resp[..2] == id[..2]
+        && Message::from_vec(resp).is_ok_and(|m| m.queries() == queries)
+}
+
+async fn forward_udp(
+    pkt: &[u8],
+    queries: &[Query],
+    up: SocketAddr,
+    timeout: Duration,
+) -> std::io::Result<Vec<u8>> {
     let bind: SocketAddr = if up.is_ipv4() {
         (Ipv4Addr::UNSPECIFIED, 0).into()
     } else {
@@ -281,7 +346,8 @@ async fn forward_udp(pkt: &[u8], up: SocketAddr, timeout: Duration) -> std::io::
         let n = tokio::time::timeout(left, s.recv(&mut buf))
             .await
             .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "dns timeout"))??;
-        if n >= 2 && buf[..2] == pkt[..2] {
+        // Identifiant ET question vérifiés : une réponse forgée doit deviner les deux.
+        if matches_query(&buf[..n], pkt, queries) {
             buf.truncate(n);
             return Ok(buf);
         }

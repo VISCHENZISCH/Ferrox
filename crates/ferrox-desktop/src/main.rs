@@ -1,8 +1,6 @@
 //! Ferrox : application de bureau.
 
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
-// Quelques aides de thème et variantes sont gardées pour les évolutions de l'interface.
-#![allow(dead_code)]
 
 mod app;
 mod fmt;

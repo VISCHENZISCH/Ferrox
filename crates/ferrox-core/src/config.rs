@@ -94,6 +94,18 @@ impl Config {
         }
     }
 
+    /// Vrai si passer de `self` à `next` demande de redémarrer le moteur ;
+    /// les seuils de détection et le thème s'appliquent à chaud.
+    pub fn restart_needed(&self, next: &Config) -> bool {
+        let key = |c: &Config| {
+            let mut c = c.clone();
+            c.detect = DetectConfig::default();
+            c.ui = UiConfig::default();
+            toml::to_string(&c).unwrap_or_default()
+        };
+        key(self) != key(next)
+    }
+
     pub fn save(&self, path: &Path) -> anyhow::Result<()> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
@@ -116,8 +128,31 @@ pub struct ProxyConfig {
     pub transparent_http: Option<String>,
     /// Proxy transparent HTTPS (trafic du port 443 redirigé), routage par SNI.
     pub transparent_https: Option<String>,
+    /// Réseaux clients autorisés (CIDR). Vide : boucle locale seulement.
+    /// `0.0.0.0/0` et `::/0` ouvrent à tous : à réserver à un réseau de confiance.
+    pub allow: Vec<String>,
+    /// Ports de destination acceptés pour CONNECT (relais SMTP, SSRF sinon).
+    pub connect_ports: Vec<u16>,
+    /// Connexions clientes simultanées au maximum (tous écouteurs du proxy).
+    pub max_connections: usize,
+    /// Authentification Basic du proxy explicite (facultative).
+    pub auth: Option<ProxyAuth>,
     pub connect_timeout_ms: u64,
+    /// Délai d'attente des en-têtes de réponse du serveur amont.
+    pub response_timeout_s: u64,
+    /// Délai d'inactivité d'un tunnel (CONNECT, transparent HTTPS) avant fermeture.
     pub idle_timeout_s: u64,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+#[serde(default)]
+pub struct ProxyAuth {
+    pub user: String,
+    pub password: String,
+}
+
+pub fn default_allow() -> Vec<String> {
+    vec!["127.0.0.0/8".into(), "::1/128".into()]
 }
 
 impl Default for ProxyConfig {
@@ -127,7 +162,12 @@ impl Default for ProxyConfig {
             listen: "127.0.0.1:3128".into(),
             transparent_http: None,
             transparent_https: None,
+            allow: default_allow(),
+            connect_ports: vec![443, 8443],
+            max_connections: 4096,
+            auth: None,
             connect_timeout_ms: 8000,
+            response_timeout_s: 60,
             idle_timeout_s: 300,
         }
     }
@@ -151,6 +191,11 @@ pub struct DnsConfig {
     pub block_mode: DnsBlockMode,
     pub cache_entries: usize,
     pub timeout_ms: u64,
+    /// Réseaux clients autorisés (CIDR). Vide : boucle locale seulement.
+    /// Un résolveur ouvert sert à l'amplification : n'ouvrez que vos réseaux.
+    pub allow: Vec<String>,
+    /// Connexions DNS sur TCP simultanées au maximum.
+    pub max_tcp_clients: usize,
 }
 
 impl Default for DnsConfig {
@@ -162,6 +207,8 @@ impl Default for DnsConfig {
             block_mode: DnsBlockMode::Nxdomain,
             cache_entries: 20_000,
             timeout_ms: 2000,
+            allow: default_allow(),
+            max_tcp_clients: 256,
         }
     }
 }
@@ -174,6 +221,10 @@ pub struct TlsConfig {
     pub ca_dir: Option<PathBuf>,
     /// Domaines jamais interceptés (banques, applis avec épinglage de certificat).
     pub bypass: Vec<String>,
+    /// Échecs de poignée de main interceptée avant le passage en tunnel direct.
+    pub auto_bypass_failures: u32,
+    /// Durée de ce passage en tunnel direct, en secondes.
+    pub auto_bypass_ttl_s: u64,
 }
 
 impl Default for TlsConfig {
@@ -181,6 +232,8 @@ impl Default for TlsConfig {
         Self {
             mitm: false,
             ca_dir: None,
+            auto_bypass_failures: 3,
+            auto_bypass_ttl_s: 3600,
             bypass: vec![
                 "apple.com".into(),
                 "icloud.com".into(),
@@ -423,5 +476,29 @@ impl Default for UiConfig {
         Self {
             theme: "dark".into(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn detect_changes_apply_hot() {
+        let a = Config::default();
+        let mut b = a.clone();
+        b.detect.beacon.max_cv = 0.3;
+        assert!(!a.restart_needed(&b));
+        b.proxy.listen = "127.0.0.1:3129".into();
+        assert!(a.restart_needed(&b));
+    }
+
+    #[test]
+    fn old_config_files_still_load() {
+        // Fichier 0.1 : sans allow, connect_ports ni auth.
+        let c: Config = toml::from_str("[proxy]\nlisten = \"127.0.0.1:3128\"\n").unwrap();
+        assert_eq!(c.proxy.connect_ports, vec![443, 8443]);
+        assert_eq!(c.proxy.allow, default_allow());
+        assert!(c.proxy.auth.is_none());
     }
 }

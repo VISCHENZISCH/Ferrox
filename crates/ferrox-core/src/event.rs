@@ -129,6 +129,9 @@ pub struct Alert {
     pub kind: AlertKind,
     pub client: IpAddr,
     pub target: String,
+    /// User-Agent en cause pour les alertes de type User-Agent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user_agent: Option<String>,
     pub detail: String,
     pub score: f32,
 }

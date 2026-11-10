@@ -349,7 +349,7 @@ pub fn view(app: &App, p: Pal) -> El<'_> {
                 }),
         )
         .collect();
-    blocks.sort_by(|a, b| b.0.cmp(&a.0));
+    blocks.sort_by_key(|b| std::cmp::Reverse(b.0));
     blocks.retain(|b| seen.insert(b.1.clone()));
     let n_blocks = blocks.len();
     let blocks: Vec<El> = blocks

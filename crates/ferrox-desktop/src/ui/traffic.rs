@@ -21,8 +21,7 @@ fn toolbar<'a>(
     on_query: fn(String) -> Message,
     filter: ActionFilter,
     on_filter: fn(ActionFilter) -> Message,
-    shown: usize,
-    total: usize,
+    (shown, total): (usize, usize),
     placeholder: &str,
 ) -> El<'a> {
     let search = container(
@@ -252,8 +251,7 @@ pub fn http_view(app: &App, p: Pal) -> El<'_> {
             Message::TrafficQuery,
             app.traffic_filter,
             Message::TrafficFilter,
-            shown,
-            all.len(),
+            (shown, all.len()),
             "Filtrer : hôte, client, chemin, User-Agent…",
         ),
         table(
@@ -376,8 +374,7 @@ pub fn dns_view(app: &App, p: Pal) -> El<'_> {
             Message::DnsQuery,
             app.dns_filter,
             Message::DnsFilter,
-            shown,
-            all.len(),
+            (shown, all.len()),
             "Filtrer : nom, client, type (TXT…), réponse (NXDOMAIN…)",
         ),
         table(

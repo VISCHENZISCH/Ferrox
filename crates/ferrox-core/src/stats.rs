@@ -14,6 +14,16 @@ const RECENT_LEN: usize = 1500;
 const ALERTS_LEN: usize = 2000;
 const MAP_MAX: usize = 50_000;
 
+/// Horodatage le plus récent parmi le dixième le plus ancien des valeurs données :
+/// les entrées dont `last_ts` est inférieur ou égal sont à retirer.
+fn oldest_tenth_cutoff(mut ts: Vec<i64>) -> i64 {
+    if ts.is_empty() {
+        return i64::MIN;
+    }
+    let cut = (ts.len() / 10).min(ts.len() - 1);
+    *ts.select_nth_unstable(cut).1
+}
+
 #[derive(Serialize, Clone, Copy, Debug, Default)]
 pub struct Totals {
     pub requests: u64,
@@ -233,8 +243,14 @@ impl Stats {
 
     fn domain(inner: &mut Inner, host: &str, client: IpAddr, ts: i64, blocked: bool, bytes: u64) {
         if inner.domains.len() >= MAP_MAX && !inner.domains.contains_key(host) {
-            // Élimine les domaines vus une seule fois pour borner la mémoire.
+            // Élimine les domaines vus une seule fois pour borner la mémoire,
+            // puis, si cela ne suffit pas, le dixième le plus ancien.
             inner.domains.retain(|_, d| d.requests > 1);
+            if inner.domains.len() >= MAP_MAX {
+                let limit =
+                    oldest_tenth_cutoff(inner.domains.values().map(|d| d.last_ts).collect());
+                inner.domains.retain(|_, d| d.last_ts > limit);
+            }
         }
         let d = inner.domains.entry(host.to_string()).or_insert(DomainAcc {
             requests: 0,
@@ -253,6 +269,11 @@ impl Stats {
     }
 
     fn client(inner: &mut Inner, ip: IpAddr) -> &mut ClientStat {
+        if inner.clients.len() >= MAP_MAX && !inner.clients.contains_key(&ip) {
+            // Table bornée : le dixième le plus ancien est retiré, en temps linéaire.
+            let limit = oldest_tenth_cutoff(inner.clients.values().map(|c| c.last_ts).collect());
+            inner.clients.retain(|_, c| c.last_ts > limit);
+        }
         inner.clients.entry(ip).or_insert(ClientStat {
             client: ip,
             requests: 0,
@@ -283,6 +304,14 @@ impl Stats {
         if inner.alerts.len() > ALERTS_LEN {
             inner.alerts.pop_front();
         }
+    }
+
+    /// Alertes d'identifiant strictement supérieur à `after` (dans l'ordre), sans plafond
+    /// autre que l'historique conservé : aucune alerte n'est sautée en rafale.
+    pub fn alerts_since(&self, after: u64) -> Vec<Alert> {
+        let g = self.inner.lock();
+        let start = g.alerts.partition_point(|a| a.id <= after);
+        g.alerts.range(start..).cloned().collect()
     }
 
     pub fn seq(&self) -> u64 {
@@ -325,7 +354,7 @@ impl Stats {
                 last_ts: d.last_ts,
             })
             .collect();
-        top_domains.sort_unstable_by(|a, b| b.requests.cmp(&a.requests));
+        top_domains.sort_unstable_by_key(|d| std::cmp::Reverse(d.requests));
         top_domains.truncate(opts.top);
 
         let mut top_clients: Vec<ClientStat> = g.clients.values().cloned().collect();
@@ -336,10 +365,10 @@ impl Stats {
 
         let mut cats: Vec<(String, u64)> =
             g.categories.iter().map(|(k, v)| (k.clone(), *v)).collect();
-        cats.sort_unstable_by(|a, b| b.1.cmp(&a.1));
+        cats.sort_unstable_by_key(|c| std::cmp::Reverse(c.1));
         let mut kinds: Vec<(AlertKind, u64)> =
             g.alert_kinds.iter().map(|(k, v)| (*k, *v)).collect();
-        kinds.sort_unstable_by(|a, b| b.1.cmp(&a.1));
+        kinds.sort_unstable_by_key(|k| std::cmp::Reverse(k.1));
 
         let tail = |len: usize, n: usize| len.saturating_sub(n);
         Snapshot {
@@ -371,5 +400,21 @@ impl Stats {
                 .cloned()
                 .collect(),
         }
+    }
+}
+
+#[cfg(test)]
+mod bound_tests {
+    use super::oldest_tenth_cutoff;
+
+    #[test]
+    fn cutoff_removes_about_a_tenth() {
+        let ts: Vec<i64> = (0..100).collect();
+        let limit = oldest_tenth_cutoff(ts.clone());
+        let kept = ts.iter().filter(|&&t| t > limit).count();
+        assert!((85..=90).contains(&kept), "{kept}");
+        // Toutes égales : tout est retiré, la table repart de zéro plutôt que de grossir.
+        assert_eq!(oldest_tenth_cutoff(vec![5; 10]), 5);
+        assert_eq!(oldest_tenth_cutoff(vec![]), i64::MIN);
     }
 }

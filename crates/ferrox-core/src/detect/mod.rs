@@ -113,24 +113,44 @@ fn human_bytes(b: f64) -> String {
     }
 }
 
+/// Paramètres d'une alerte (remplace les dix arguments positionnels).
+struct AlertSpec<'a> {
+    ts: i64,
+    cooldown_ms: i64,
+    kind: AlertKind,
+    severity: Severity,
+    client: IpAddr,
+    target: &'a str,
+    /// User-Agent en cause, écrit dans `user_agent.original` (jamais dans le domaine).
+    user_agent: Option<&'a str>,
+    detail: String,
+    score: f32,
+}
+
 impl Detector {
     pub fn new() -> Self {
         Self::default()
     }
 
-    fn alert(
-        &mut self,
-        out: &mut Vec<Alert>,
-        ts: i64,
-        cooldown_ms: i64,
-        kind: AlertKind,
-        severity: Severity,
-        client: IpAddr,
-        target: &str,
-        detail: String,
-        score: f32,
-    ) {
-        let key = (kind, client, Box::<str>::from(target));
+    fn alert(&mut self, out: &mut Vec<Alert>, a: AlertSpec<'_>) {
+        let AlertSpec {
+            ts,
+            cooldown_ms,
+            kind,
+            severity,
+            client,
+            target,
+            user_agent,
+            detail,
+            score,
+        } = a;
+        // Le User-Agent fait partie de la clé : deux outils différents vers un même hôte
+        // donnent deux alertes.
+        let key_target = match user_agent {
+            Some(ua) => format!("{target}\u{0}{ua}"),
+            None => target.to_string(),
+        };
+        let key = (kind, client, Box::<str>::from(key_target));
         if let Some(&last) = self.cooldown.get(&key) {
             if ts - last < cooldown_ms {
                 return;
@@ -145,6 +165,7 @@ impl Detector {
             kind,
             client,
             target: target.to_string(),
+            user_agent: user_agent.map(str::to_string),
             detail,
             score,
         });
@@ -178,17 +199,20 @@ impl Detector {
         };
         self.alert(
             out,
-            ts,
-            10 * 60_000,
-            AlertKind::ThreatBlocked,
-            sev,
-            client,
-            target,
-            format!(
-                "Accès à un domaine classé « {cat} » bloqué ({})",
-                reason.as_deref().unwrap_or("liste")
-            ),
-            0.9,
+            AlertSpec {
+                ts,
+                cooldown_ms: 10 * 60_000,
+                kind: AlertKind::ThreatBlocked,
+                severity: sev,
+                client,
+                target,
+                user_agent: None,
+                detail: format!(
+                    "Accès à un domaine classé « {cat} » bloqué ({})",
+                    reason.as_deref().unwrap_or("liste")
+                ),
+                score: 0.9,
+            },
         );
     }
 
@@ -267,18 +291,21 @@ impl Detector {
             + (1.0 - size_cv.min(1.0)) as f32 * 0.3;
         self.alert(
             out,
-            e.ts,
-            30 * 60_000,
-            AlertKind::Beacon,
-            severity,
-            e.client,
-            &e.host,
-            format!(
+            AlertSpec {
+                ts: e.ts,
+                cooldown_ms: 30 * 60_000,
+                kind: AlertKind::Beacon,
+                severity,
+                client: e.client,
+                target: &e.host,
+                user_agent: None,
+                detail: format!(
                 "{n} contacts réguliers, intervalle moyen {mean:.1} s, gigue {:.1} %, taille moyenne {}",
                 cv * 100.0,
                 human_bytes(sm)
             ),
-            score,
+                score,
+            },
         );
     }
 
@@ -288,14 +315,17 @@ impl Detector {
         if up >= xc.single_upload_mb * MB {
             self.alert(
                 out,
-                e.ts,
-                5 * 60_000,
-                AlertKind::Exfiltration,
-                Severity::High,
-                e.client,
-                &e.host,
-                format!("Envoi unique de {} vers {}", human_bytes(up), e.host),
-                (up / (xc.single_upload_mb * MB) / 4.0).min(1.0) as f32,
+                AlertSpec {
+                    ts: e.ts,
+                    cooldown_ms: 5 * 60_000,
+                    kind: AlertKind::Exfiltration,
+                    severity: Severity::High,
+                    client: e.client,
+                    target: &e.host,
+                    user_agent: None,
+                    detail: format!("Envoi unique de {} vers {}", human_bytes(up), e.host),
+                    score: (up / (xc.single_upload_mb * MB) / 4.0).min(1.0) as f32,
+                },
             );
         }
 
@@ -316,18 +346,21 @@ impl Detector {
         if total >= xc.window_upload_mb * MB {
             self.alert(
                 out,
-                e.ts,
-                window_ms,
-                AlertKind::Exfiltration,
-                Severity::High,
-                e.client,
-                "*",
-                format!(
-                    "{} envoyés en {} s par ce client",
-                    human_bytes(total),
-                    xc.window_s
-                ),
-                0.8,
+                AlertSpec {
+                    ts: e.ts,
+                    cooldown_ms: window_ms,
+                    kind: AlertKind::Exfiltration,
+                    severity: Severity::High,
+                    client: e.client,
+                    target: "*",
+                    user_agent: None,
+                    detail: format!(
+                        "{} envoyés en {} s par ce client",
+                        human_bytes(total),
+                        xc.window_s
+                    ),
+                    score: 0.8,
+                },
             );
         }
 
@@ -349,19 +382,22 @@ impl Detector {
         if pu >= xc.ratio_min_mb * MB && pu > xc.ratio * pd.max(1.0) {
             self.alert(
                 out,
-                e.ts,
-                30 * 60_000,
-                AlertKind::Exfiltration,
-                Severity::Medium,
-                e.client,
-                &reg,
-                format!(
-                    "Trafic asymétrique : {} envoyés pour {} reçus (×{:.0})",
-                    human_bytes(pu),
-                    human_bytes(pd),
-                    pu / pd.max(1.0)
-                ),
-                0.6,
+                AlertSpec {
+                    ts: e.ts,
+                    cooldown_ms: 30 * 60_000,
+                    kind: AlertKind::Exfiltration,
+                    severity: Severity::Medium,
+                    client: e.client,
+                    target: &reg,
+                    user_agent: None,
+                    detail: format!(
+                        "Trafic asymétrique : {} envoyés pour {} reçus (×{:.0})",
+                        human_bytes(pu),
+                        human_bytes(pd),
+                        pu / pd.max(1.0)
+                    ),
+                    score: 0.6,
+                },
             );
         }
     }
@@ -378,14 +414,17 @@ impl Detector {
                 if uc.alert_empty && e.scheme != Scheme::Tunnel {
                     self.alert(
                         out,
-                        e.ts,
-                        60 * 60_000,
-                        AlertKind::SuspiciousUserAgent,
-                        Severity::Low,
-                        e.client,
-                        &e.host,
-                        "Requête sans User-Agent".into(),
-                        0.3,
+                        AlertSpec {
+                            ts: e.ts,
+                            cooldown_ms: 60 * 60_000,
+                            kind: AlertKind::SuspiciousUserAgent,
+                            severity: Severity::Low,
+                            client: e.client,
+                            target: &e.host,
+                            user_agent: None,
+                            detail: "Requête sans User-Agent".into(),
+                            score: 0.3,
+                        },
                     );
                 }
             }
@@ -406,14 +445,20 @@ impl Detector {
                     };
                     self.alert(
                         out,
-                        e.ts,
-                        60 * 60_000,
-                        AlertKind::SuspiciousUserAgent,
-                        sev,
-                        e.client,
-                        ua,
-                        format!("User-Agent d'outil ou de script (« {m} ») vers {}", e.host),
-                        0.5,
+                        AlertSpec {
+                            ts: e.ts,
+                            cooldown_ms: 60 * 60_000,
+                            kind: AlertKind::SuspiciousUserAgent,
+                            severity: sev,
+                            client: e.client,
+                            target: &e.host,
+                            user_agent: Some(ua),
+                            detail: format!(
+                                "User-Agent d'outil ou de script (« {m} ») vers {}",
+                                e.host
+                            ),
+                            score: 0.5,
+                        },
                     );
                 }
                 let seen = self.ua_seen.entry(e.client).or_default();
@@ -423,16 +468,19 @@ impl Detector {
                     let n = seen.len();
                     self.alert(
                         out,
-                        e.ts,
-                        30 * 60_000,
-                        AlertKind::SuspiciousUserAgent,
-                        Severity::Medium,
-                        e.client,
-                        "*",
-                        format!(
-                            "{n} User-Agents différents en 10 minutes (rotation ou usurpation)"
-                        ),
-                        0.5,
+                        AlertSpec {
+                            ts: e.ts,
+                            cooldown_ms: 30 * 60_000,
+                            kind: AlertKind::SuspiciousUserAgent,
+                            severity: Severity::Medium,
+                            client: e.client,
+                            target: "*",
+                            user_agent: None,
+                            detail: format!(
+                                "{n} User-Agents différents en 10 minutes (rotation ou usurpation)"
+                            ),
+                            score: 0.5,
+                        },
                     );
                 }
             }
@@ -459,18 +507,21 @@ impl Detector {
         if e.qname.len() > dc.max_qname_len || longest > dc.max_label_len {
             self.alert(
                 out,
-                e.ts,
-                10 * 60_000,
-                AlertKind::DnsTunnel,
-                Severity::High,
-                e.client,
-                &reg,
-                format!(
-                    "Requête anormalement longue ({} caractères, label de {longest}) : {}",
-                    e.qname.len(),
-                    truncate(&e.qname, 80)
-                ),
-                0.8,
+                AlertSpec {
+                    ts: e.ts,
+                    cooldown_ms: 10 * 60_000,
+                    kind: AlertKind::DnsTunnel,
+                    severity: Severity::High,
+                    client: e.client,
+                    target: &reg,
+                    user_agent: None,
+                    detail: format!(
+                        "Requête anormalement longue ({} caractères, label de {longest}) : {}",
+                        e.qname.len(),
+                        truncate(&e.qname, 80)
+                    ),
+                    score: 0.8,
+                },
             );
         }
 
@@ -484,14 +535,17 @@ impl Detector {
             if h >= dc.entropy_threshold && (digits > 0.15 || vowels < 0.25) {
                 self.alert(
                     out,
-                    e.ts,
-                    30 * 60_000,
-                    AlertKind::DnsDga,
-                    Severity::Medium,
-                    e.client,
-                    &reg,
-                    format!("Nom d'apparence aléatoire (entropie {h:.2} bits/car.)"),
-                    (h / 4.5).min(1.0) as f32,
+                    AlertSpec {
+                        ts: e.ts,
+                        cooldown_ms: 30 * 60_000,
+                        kind: AlertKind::DnsDga,
+                        severity: Severity::Medium,
+                        client: e.client,
+                        target: &reg,
+                        user_agent: None,
+                        detail: format!("Nom d'apparence aléatoire (entropie {h:.2} bits/car.)"),
+                        score: (h / 4.5).min(1.0) as f32,
+                    },
                 );
             }
         }
@@ -517,27 +571,33 @@ impl Detector {
         if txt > dc.txt_per_min {
             self.alert(
                 out,
-                e.ts,
-                10 * 60_000,
-                AlertKind::DnsTunnel,
-                Severity::High,
-                e.client,
-                &reg,
-                format!("{txt} requêtes TXT/CNAME/MX en une minute"),
-                0.8,
+                AlertSpec {
+                    ts: e.ts,
+                    cooldown_ms: 10 * 60_000,
+                    kind: AlertKind::DnsTunnel,
+                    severity: Severity::High,
+                    client: e.client,
+                    target: &reg,
+                    user_agent: None,
+                    detail: format!("{txt} requêtes TXT/CNAME/MX en une minute"),
+                    score: 0.8,
+                },
             );
         }
         if subs > dc.unique_sub_per_min {
             self.alert(
                 out,
-                e.ts,
-                10 * 60_000,
-                AlertKind::DnsTunnel,
-                Severity::High,
-                e.client,
-                &reg,
-                format!("{subs} sous-domaines uniques en une minute"),
-                0.85,
+                AlertSpec {
+                    ts: e.ts,
+                    cooldown_ms: 10 * 60_000,
+                    kind: AlertKind::DnsTunnel,
+                    severity: Severity::High,
+                    client: e.client,
+                    target: &reg,
+                    user_agent: None,
+                    detail: format!("{subs} sous-domaines uniques en une minute"),
+                    score: 0.85,
+                },
             );
         }
 
@@ -557,14 +617,17 @@ impl Detector {
         if n >= dc.nx_min && n as f64 / t as f64 >= dc.nx_ratio {
             self.alert(
                 out,
-                e.ts,
-                10 * 60_000,
-                AlertKind::DnsNxStorm,
-                Severity::High,
-                e.client,
-                "*",
-                format!("{n} réponses NXDOMAIN sur {t} requêtes en une minute"),
-                0.8,
+                AlertSpec {
+                    ts: e.ts,
+                    cooldown_ms: 10 * 60_000,
+                    kind: AlertKind::DnsNxStorm,
+                    severity: Severity::High,
+                    client: e.client,
+                    target: "*",
+                    user_agent: None,
+                    detail: format!("{n} réponses NXDOMAIN sur {t} requêtes en une minute"),
+                    score: 0.8,
+                },
             );
         }
     }

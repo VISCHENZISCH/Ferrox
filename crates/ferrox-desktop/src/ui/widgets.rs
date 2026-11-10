@@ -65,6 +65,8 @@ pub fn card<'a>(
 pub enum Kind {
     Primary,
     Ghost,
+    /// Action destructive (style prêt, pas encore utilisé).
+    #[allow(dead_code)]
     Danger,
     Text,
 }
@@ -154,13 +156,6 @@ pub fn tag<'a>(p: Pal, label: &str, msg: Message) -> El<'a> {
     .into()
 }
 
-/// Témoin rond.
-pub fn led<'a>(color: Color, size: f32) -> El<'a> {
-    container(Space::new(size, size))
-        .style(theme::fill_round(color, size / 2.0))
-        .into()
-}
-
 pub fn seg<'a>(p: Pal, items: Vec<(String, bool, Message)>) -> El<'a> {
     let mut r = row![].spacing(2);
     for (label, active, msg) in items {
@@ -185,6 +180,29 @@ pub fn field<'a>(
         text(label.to_string()).size(13).color(p.muted),
         text_input(placeholder, value)
             .on_input(on)
+            .font(MONO)
+            .size(14)
+            .padding(Padding::from([9, 12]))
+            .style(theme::input(p)),
+    ]
+    .spacing(7)
+    .width(Length::Fill)
+    .into()
+}
+
+/// Champ masqué (mot de passe).
+pub fn secret_field<'a>(
+    p: Pal,
+    label: &str,
+    value: &str,
+    placeholder: &str,
+    on: impl Fn(String) -> Message + 'a,
+) -> El<'a> {
+    column![
+        text(label.to_string()).size(13).color(p.muted),
+        text_input(placeholder, value)
+            .on_input(on)
+            .secure(true)
             .font(MONO)
             .size(14)
             .padding(Padding::from([9, 12]))

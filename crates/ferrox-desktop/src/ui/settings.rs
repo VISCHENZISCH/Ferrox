@@ -1,6 +1,6 @@
 //! Page Paramètres : écoute, DNS, interception TLS, détection, journaux.
 
-use super::widgets::{btn, card, field, hint, mono_wrap, seg, toggle_row, El, Kind};
+use super::widgets::{btn, card, field, hint, mono_wrap, secret_field, seg, toggle_row, El, Kind};
 use crate::app::{App, Field, Message, Toggle};
 use crate::icons::Ico;
 use crate::theme::{self, Pal};
@@ -38,6 +38,17 @@ pub fn view(app: &App, p: Pal) -> El<'_> {
                 field(p, "Transparent HTTPS (SNI)", &fm.transparent_https, "désactivé · ex. 0.0.0.0:8443", |v| Message::Form(Field::TransparentHttps, v)),
             ]
             .spacing(12),
+            row![
+                field(p, "Clients autorisés (réseaux)", &fm.proxy_allow, "127.0.0.0/8, ::1/128 · ex. 192.168.1.0/24", |v| Message::Form(Field::ProxyAllow, v)),
+                field(p, "Ports CONNECT autorisés", &fm.connect_ports, "443, 8443", |v| Message::Form(Field::ConnectPorts, v)),
+            ]
+            .spacing(12),
+            row![
+                field(p, "Identifiant (authentification Basic)", &fm.auth_user, "désactivée", |v| Message::Form(Field::AuthUser, v)),
+                secret_field(p, "Mot de passe", &fm.auth_password, "", |v| Message::Form(Field::AuthPassword, v)),
+            ]
+            .spacing(12),
+            hint(p, "Hors des réseaux listés, les connexions sont refusées. 0.0.0.0/0 ouvre le proxy à tous : à éviter hors d'un réseau de confiance."),
             hint(p, "Mode transparent : redirigez le trafic du réseau vers Ferrox (passerelle Linux) :"),
             code(
                 p,
@@ -57,7 +68,7 @@ pub fn view(app: &App, p: Pal) -> El<'_> {
         column![
             toggle_row(p, "Résolveur actif", "Filtre, met en cache et analyse toutes les requêtes de noms.", d.dns.enabled, |v| Message::Flag(Toggle::Dns, v)),
             row![
-                field(p, "Écoute (UDP et TCP)", &fm.dns_listen, "0.0.0.0:53", |v| Message::Form(Field::DnsListen, v)),
+                field(p, "Écoute (UDP et TCP)", &fm.dns_listen, "127.0.0.1:53", |v| Message::Form(Field::DnsListen, v)),
                 field(p, "Résolveurs amont", &fm.upstreams, "1.1.1.1:53, 9.9.9.9:53", |v| Message::Form(Field::Upstreams, v)),
             ]
             .spacing(12),
@@ -73,6 +84,8 @@ pub fn view(app: &App, p: Pal) -> El<'_> {
                 ),
             ]
             .align_y(Alignment::Center),
+            field(p, "Clients autorisés (réseaux)", &fm.dns_allow, "127.0.0.0/8, ::1/128 · ex. 192.168.1.0/24", |v| Message::Form(Field::DnsAllow, v)),
+            hint(p, "Un résolveur ouvert à Internet sert aux attaques par amplification : listez seulement vos réseaux."),
             hint(p, "Le port 53 demande des droits : sous Linux, sudo setcap cap_net_bind_service=+ep sur le binaire."),
         ]
         .spacing(12)
@@ -125,7 +138,7 @@ pub fn view(app: &App, p: Pal) -> El<'_> {
             .spacing(4),
             ca_actions,
             field(p, "Jamais intercepter (épinglage, banques)", &fm.bypass, "apple.com, banque.fr", |v| Message::Form(Field::Bypass, v)),
-            hint(p, "Un site qui refuse le certificat est automatiquement relayé sans déchiffrement par la suite."),
+            hint(p, "Un site qui refuse le certificat trois fois est relayé sans déchiffrement pendant une heure."),
         ]
         .spacing(12)
         .into(),

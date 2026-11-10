@@ -4,13 +4,15 @@
 //!   ferroxd init  [-c fichier.toml]   écrit la configuration par défaut
 //!   ferroxd update-lists [-c ...]     télécharge les listes de blocage
 //!   ferroxd ca    [-c ...]            crée la CA d'interception et affiche son chemin
+//!   ferroxd check [-c ...]            vérifie la configuration sans rien démarrer
+//!   ferroxd version                   affiche la version
 
 use ferrox_core::{Config, Engine, Paths, SnapshotOpts};
 use std::time::Duration;
 
 fn usage() -> ! {
     eprintln!(
-        "usage : ferroxd [run|init|update-lists|ca] [-c config.toml]\n\
+        "usage : ferroxd [run|init|check|update-lists|ca|version] [-c config.toml]\n\
          configuration par défaut : {}",
         Paths::default_for_platform().config_file.display()
     );
@@ -41,7 +43,11 @@ fn main() -> anyhow::Result<()> {
         match a.as_str() {
             "-c" | "--config" => paths = Paths::with_config(args.next().unwrap_or_else(|| usage())),
             "-h" | "--help" => usage(),
-            "run" | "init" | "update-lists" | "ca" => cmd = a,
+            "-V" | "--version" | "version" => {
+                println!("ferroxd {}", env!("CARGO_PKG_VERSION"));
+                return Ok(());
+            }
+            "run" | "init" | "check" | "update-lists" | "ca" => cmd = a,
             _ => usage(),
         }
     }
@@ -51,6 +57,10 @@ fn main() -> anyhow::Result<()> {
         "init" => {
             println!("configuration : {}", paths.config_file.display());
             println!("données       : {}", paths.data_dir.display());
+        }
+        "check" => {
+            ferrox_core::engine::check_config(&cfg)?;
+            println!("configuration valide : {}", paths.config_file.display());
         }
         "ca" => {
             let p = ferrox_core::ensure_ca(&cfg, &paths)?;
@@ -110,23 +120,23 @@ fn run(cfg: Config, paths: Paths) -> anyhow::Result<()> {
         });
     }
 
+    let stats = engine.stats();
     let mut last_alert = 0u64;
     let mut tick = 0u32;
     while !stop.load(std::sync::atomic::Ordering::Relaxed) {
         std::thread::sleep(Duration::from_millis(500));
         tick += 1;
-        let s = engine.snapshot(SnapshotOpts {
-            recent: 0,
-            alerts: 50,
-            series: 10,
-            top: 0,
-        });
-        let floor = last_alert;
-        for a in s.alerts.iter().filter(|a| a.id > floor) {
-            println!("{}", serde_json::to_string(a).unwrap_or_default());
+        for a in stats.alerts_since(last_alert) {
+            println!("{}", serde_json::to_string(&a).unwrap_or_default());
             last_alert = a.id;
         }
-        if tick % 20 == 0 {
+        if tick.is_multiple_of(20) {
+            let s = engine.snapshot(SnapshotOpts {
+                recent: 0,
+                alerts: 0,
+                series: 0,
+                top: 0,
+            });
             let t = s.totals;
             eprintln!(
                 "req {} | bloquées {} | DNS {} ({} bloquées) | ↑ {} ↓ {} | alertes {} | conn {}",

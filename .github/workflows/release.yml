@@ -1,0 +1,157 @@
+# Publie les exécutables Linux, Windows et macOS quand une étiquette vX.Y.Z est poussée :
+#   git tag -a v0.2.0 -m "Ferrox 0.2.0 Rempart" && git push origin v0.2.0
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64
+            os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+          - name: windows-x86_64
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+          - name: macos-universal
+            os: macos-14
+            target: aarch64-apple-darwin
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}${{ matrix.os == 'macos-14' && ',x86_64-apple-darwin' || '' }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.name }}
+
+      - name: Tests
+        run: cargo test --workspace --locked
+
+      - name: Version
+        id: v
+        shell: bash
+        run: echo "version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)" >> "$GITHUB_OUTPUT"
+
+      # ------------------------------------------------------------ Linux
+      - name: Compilation Linux (durcie)
+        if: runner.os == 'Linux'
+        env:
+          RUSTFLAGS: -C link-arg=-Wl,-z,relro,-z,now -C link-arg=-Wl,-z,noexecstack
+        run: cargo build --workspace --release --locked --target ${{ matrix.target }}
+      - name: Archive Linux
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          d=ferrox-${{ steps.v.outputs.version }}-${{ matrix.name }}
+          mkdir -p "$d"
+          cp target/${{ matrix.target }}/release/{ferrox,ferroxd} "$d/"
+          cp README.md LICENSE CHANGELOG.md config/ferrox.example.toml packaging/ferroxd.service "$d/"
+          tar -czf "$d.tar.gz" "$d"
+          echo "ASSET=$d.tar.gz" >> "$GITHUB_ENV"
+
+      # ------------------------------------------------------------ Windows
+      - name: Compilation Windows
+        if: runner.os == 'Windows'
+        run: cargo build --workspace --release --locked --target ${{ matrix.target }}
+      - name: Archive Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $d = "ferrox-${{ steps.v.outputs.version }}-${{ matrix.name }}"
+          New-Item -ItemType Directory -Path $d | Out-Null
+          Copy-Item target/${{ matrix.target }}/release/ferrox.exe, target/${{ matrix.target }}/release/ferroxd.exe $d
+          Copy-Item README.md, LICENSE, CHANGELOG.md, config/ferrox.example.toml $d
+          Compress-Archive -Path $d -DestinationPath "$d.zip"
+          "ASSET=$d.zip" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      # ------------------------------------------------------------ macOS
+      - name: Compilation macOS (Apple Silicon et Intel)
+        if: runner.os == 'macOS'
+        env:
+          MACOSX_DEPLOYMENT_TARGET: "11.0"
+        run: |
+          cargo build --workspace --release --locked --target aarch64-apple-darwin
+          cargo build --workspace --release --locked --target x86_64-apple-darwin
+      - name: Archive macOS (binaires universels et Ferrox.app)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          v=${{ steps.v.outputs.version }}
+          d=ferrox-$v-${{ matrix.name }}
+          mkdir -p "$d/Ferrox.app/Contents/MacOS" "$d/Ferrox.app/Contents/Resources"
+          for b in ferrox ferroxd; do
+            lipo -create -output "$d/$b" \
+              target/aarch64-apple-darwin/release/$b target/x86_64-apple-darwin/release/$b
+          done
+          cp "$d/ferrox" "$d/Ferrox.app/Contents/MacOS/ferrox"
+          # Icône : PNG du projet converti en .icns.
+          mkdir icon.iconset
+          for s in 16 32 64 128 256 512; do
+            sips -s format png -z $s $s crates/ferrox-desktop/assets/icon-64.png --out icon.iconset/icon_${s}x${s}.png >/dev/null
+          done
+          iconutil -c icns icon.iconset -o "$d/Ferrox.app/Contents/Resources/Ferrox.icns" || true
+          cat > "$d/Ferrox.app/Contents/Info.plist" <<PLIST
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0"><dict>
+            <key>CFBundleName</key><string>Ferrox</string>
+            <key>CFBundleDisplayName</key><string>Ferrox</string>
+            <key>CFBundleIdentifier</key><string>org.ferrox.Ferrox</string>
+            <key>CFBundleExecutable</key><string>ferrox</string>
+            <key>CFBundleIconFile</key><string>Ferrox</string>
+            <key>CFBundlePackageType</key><string>APPL</string>
+            <key>CFBundleShortVersionString</key><string>$v</string>
+            <key>CFBundleVersion</key><string>$v</string>
+            <key>LSMinimumSystemVersion</key><string>11.0</string>
+            <key>NSHighResolutionCapable</key><true/>
+          </dict></plist>
+          PLIST
+          # Signature ad hoc : nécessaire pour lancer un binaire arm64.
+          codesign --force --deep --sign - "$d/Ferrox.app"
+          codesign --force --sign - "$d/ferrox" "$d/ferroxd"
+          cp README.md LICENSE CHANGELOG.md config/ferrox.example.toml "$d/"
+          tar -czf "$d.tar.gz" "$d"
+          echo "ASSET=$d.tar.gz" >> "$GITHUB_ENV"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: ${{ env.ASSET }}
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Sommes de contrôle
+        run: cd dist && sha256sum * > SHA256SUMS.txt && cat SHA256SUMS.txt
+      - name: Notes de version (section du CHANGELOG)
+        run: |
+          v="${GITHUB_REF_NAME#v}"
+          awk -v v="$v" '$0 ~ "^## \\[" v "\\]" {p=1; next} /^## \[/ {p=0} p' CHANGELOG.md > notes.md
+          cat notes.md
+      - uses: softprops/action-gh-release@v2
+        with:
+          name: Ferrox ${{ github.ref_name }}
+          body_path: notes.md
+          files: dist/*

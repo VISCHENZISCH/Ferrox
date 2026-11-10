@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
+  <title>Ferrox</title>
+  <!-- Fond arrondi -->
+  <rect x="0" y="0" width="512" height="512" rx="112" ry="112" fill="#141414"/>
+  <!-- Trafic entrant : tous les flux du réseau, en gris -->
+  <g fill="none" stroke="#8C8C86" stroke-width="26" stroke-linecap="round">
+    <path d="M80 196 H200"/>
+    <path d="M80 256 H200"/>
+    <path d="M80 316 H200"/>
+  </g>
+  <!-- Trafic sortant autorisé, en clair -->
+  <g fill="none" stroke="#F1F1EC" stroke-width="26" stroke-linecap="round">
+    <path d="M312 196 H432"/>
+    <path d="M312 256 H432"/>
+    <path d="M312 316 H376"/>
+  </g>
+  <!-- Flux bloqué : une barrière rouge -->
+  <path d="M420 286 V346" fill="none" stroke="#F0624C" stroke-width="26" stroke-linecap="round"/>
+  <!-- Point d'inspection : la lentille du proxy -->
+  <circle cx="256" cy="256" r="100" fill="#141414" stroke="#F1F1EC" stroke-width="28"/>
+  <circle cx="256" cy="256" r="32" fill="#F1F1EC"/>
+</svg>
