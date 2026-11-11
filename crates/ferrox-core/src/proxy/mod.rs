@@ -55,6 +55,9 @@ pub struct ProxyCtx {
     /// Inactivité maximale d'un tunnel.
     pub idle_timeout: Duration,
     pub active: Arc<AtomicU64>,
+    /// Octets relayés, montant et descendant, comptés au fil de l'eau.
+    pub live_up: Arc<AtomicU64>,
+    pub live_down: Arc<AtomicU64>,
 }
 
 impl ProxyCtx {
@@ -412,7 +415,10 @@ async fn handle(
 
     let up = Arc::new(AtomicU64::new(0));
     let down = Arc::new(AtomicU64::new(0));
-    let upstream_req = Request::from_parts(parts, Counted::new(body, up.clone(), None).boxed());
+    let upstream_req = Request::from_parts(
+        parts,
+        Counted::new(body, up.clone(), ctx.live_up.clone(), None).boxed(),
+    );
 
     let resp =
         match tokio::time::timeout(ctx.response_timeout, ctx.client.request(upstream_req)).await {
@@ -479,7 +485,13 @@ async fn handle(
         down: down.clone(),
         sink: ctx.sink.clone(),
     };
-    let body = Counted::new(Prepend::new(first, rbody), down, Some(guard)).boxed();
+    let body = Counted::new(
+        Prepend::new(first, rbody),
+        down,
+        ctx.live_down.clone(),
+        Some(guard),
+    )
+    .boxed();
     Response::from_parts(rparts, body)
 }
 
@@ -608,14 +620,14 @@ async fn splice<A>(
 ) where
     A: AsyncRead + AsyncWrite + Unpin,
 {
-    let (up, down) = splice_idle(a, b, ctx.idle_timeout).await;
+    let (up, down) = splice_counted(a, b, ctx.idle_timeout, &ctx.live_up, &ctx.live_down).await;
     ev.bytes_up += up;
     ev.bytes_down += down;
     emit_now(ctx, ev, status, None, start);
 }
 
 /// Copie un sens du tunnel ; s'arrête après `idle` sans aucun octet reçu.
-async fn pipe<R, W>(mut r: R, mut w: W, idle: Duration) -> u64
+async fn pipe<R, W>(mut r: R, mut w: W, idle: Duration, live: &AtomicU64) -> u64
 where
     R: AsyncRead + Unpin,
     W: AsyncWrite + Unpin,
@@ -632,6 +644,7 @@ where
             break;
         }
         total += n as u64;
+        live.fetch_add(n as u64, Ordering::Relaxed);
     }
     let _ = w.shutdown().await;
     total
@@ -643,9 +656,25 @@ where
     A: AsyncRead + AsyncWrite + Unpin,
     B: AsyncRead + AsyncWrite + Unpin,
 {
+    let (up, down) = (AtomicU64::new(0), AtomicU64::new(0));
+    splice_counted(a, b, idle, &up, &down).await
+}
+
+/// Comme `splice_idle`, en alimentant aussi les compteurs globaux de débit.
+async fn splice_counted<A, B>(
+    a: A,
+    b: B,
+    idle: Duration,
+    live_up: &AtomicU64,
+    live_down: &AtomicU64,
+) -> (u64, u64)
+where
+    A: AsyncRead + AsyncWrite + Unpin,
+    B: AsyncRead + AsyncWrite + Unpin,
+{
     let (ar, aw) = tokio::io::split(a);
     let (br, bw) = tokio::io::split(b);
-    tokio::join!(pipe(ar, bw, idle), pipe(br, aw, idle))
+    tokio::join!(pipe(ar, bw, idle, live_up), pipe(br, aw, idle, live_down))
 }
 
 type BoxFut = std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>;
@@ -745,6 +774,7 @@ async fn transparent_tls(mut stream: TcpStream, client: IpAddr, ctx: Arc<ProxyCt
     }
     let mut ev = ev;
     ev.bytes_up = buf.len() as u64;
+    ctx.live_up.fetch_add(buf.len() as u64, Ordering::Relaxed);
     splice(stream, upstream, ev, 200, start, &ctx).await;
 }
 

@@ -217,6 +217,17 @@ fn connect_limited_to_allowed_ports() {
     s.read_exact(&mut buf).unwrap();
     assert_eq!(&buf, b"ping");
 
+    // Débit en temps réel : les octets du tunnel encore ouvert sont déjà comptés.
+    let t = engine
+        .snapshot(ferrox_core::SnapshotOpts {
+            recent: 0,
+            alerts: 0,
+            series: 0,
+            top: 0,
+        })
+        .totals;
+    assert!(t.live_bytes_up >= 4 && t.live_bytes_down >= 4, "{t:?}");
+
     // Rechargement du filtrage à chaud : le tunnel ouvert continue (ENF-06).
     let mut f = cfg.filter.clone();
     f.custom_block.push("autre.test".into());

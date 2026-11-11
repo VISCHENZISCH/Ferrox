@@ -34,14 +34,22 @@ impl Drop for EventGuard {
 pub struct Counted<B> {
     inner: B,
     counter: Arc<AtomicU64>,
+    /// Compteur global du sens concerné (débit en temps réel).
+    live: Arc<AtomicU64>,
     _guard: Option<EventGuard>,
 }
 
 impl<B> Counted<B> {
-    pub fn new(inner: B, counter: Arc<AtomicU64>, guard: Option<EventGuard>) -> Self {
+    pub fn new(
+        inner: B,
+        counter: Arc<AtomicU64>,
+        live: Arc<AtomicU64>,
+        guard: Option<EventGuard>,
+    ) -> Self {
         Self {
             inner,
             counter,
+            live,
             _guard: guard,
         }
     }
@@ -63,6 +71,7 @@ where
         if let Poll::Ready(Some(Ok(ref f))) = r {
             if let Some(d) = f.data_ref() {
                 this.counter.fetch_add(d.len() as u64, Ordering::Relaxed);
+                this.live.fetch_add(d.len() as u64, Ordering::Relaxed);
             }
         }
         r

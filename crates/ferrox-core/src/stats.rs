@@ -36,6 +36,10 @@ pub struct Totals {
     pub alerts: u64,
     pub dropped_events: u64,
     pub active_connections: u64,
+    /// Octets relayés depuis le démarrage, comptés au fil de l'eau (tunnels ouverts compris) :
+    /// la différence entre deux instantanés donne le débit en temps réel.
+    pub live_bytes_up: u64,
+    pub live_bytes_down: u64,
 }
 
 #[derive(Serialize, Clone, Copy, Debug, Default)]
@@ -114,6 +118,9 @@ pub struct Stats {
     inner: Mutex<Inner>,
     pub active: Arc<AtomicU64>,
     pub dropped: Arc<AtomicU64>,
+    /// Compteurs d'octets incrémentés par le proxy à chaque bloc relayé.
+    pub live_up: Arc<AtomicU64>,
+    pub live_down: Arc<AtomicU64>,
     started: std::time::Instant,
 }
 
@@ -149,6 +156,8 @@ impl Stats {
             inner: Mutex::new(Inner::default()),
             active: Arc::new(AtomicU64::new(0)),
             dropped: Arc::new(AtomicU64::new(0)),
+            live_up: Arc::new(AtomicU64::new(0)),
+            live_down: Arc::new(AtomicU64::new(0)),
             started: std::time::Instant::now(),
         }
     }
@@ -323,6 +332,8 @@ impl Stats {
         let mut totals = g.totals;
         totals.active_connections = self.active.load(Ordering::Relaxed);
         totals.dropped_events = self.dropped.load(Ordering::Relaxed);
+        totals.live_bytes_up = self.live_up.load(Ordering::Relaxed);
+        totals.live_bytes_down = self.live_down.load(Ordering::Relaxed);
 
         // Série continue : secondes manquantes remplies de zéros.
         let now = now_ms() / 1000;

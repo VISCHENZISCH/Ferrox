@@ -169,6 +169,8 @@ impl Engine {
                     response_timeout: Duration::from_secs(cfg.proxy.response_timeout_s.max(1)),
                     idle_timeout: Duration::from_secs(cfg.proxy.idle_timeout_s.max(5)),
                     active: stats.active.clone(),
+                    live_up: stats.live_up.clone(),
+                    live_down: stats.live_down.clone(),
                 });
                 let l = TcpListener::bind(resolve_addr(&cfg.proxy.listen)?)
                     .await
