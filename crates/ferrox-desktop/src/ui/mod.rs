@@ -10,10 +10,9 @@ pub mod widgets;
 
 use crate::app::{App, Message, Page};
 use crate::icons::{icon, Ico};
-use crate::theme::{self, Pal, UI, UI_BOLD, UI_HEAVY};
+use crate::theme::{self, size, Pal, UI_BOLD, UI_HEAVY, UI_STRONG};
 use iced::widget::{
-    button, column, container, horizontal_space, row, stack, svg, text, text_input, vertical_space,
-    Space,
+    button, column, container, horizontal_space, row, stack, svg, text, vertical_space, Space,
 };
 use iced::{Alignment, Length, Padding};
 use widgets::{btn, El, Kind};
@@ -64,8 +63,11 @@ pub fn view(app: &App) -> El<'_> {
             };
             row![
                 column![
-                    text(title).size(30).font(UI_HEAVY).color(p.text),
-                    text(subtitle).size(14).color(p.muted),
+                    text(title)
+                        .size(size::DISPLAY)
+                        .font(UI_STRONG)
+                        .color(p.text),
+                    text(subtitle).size(size::BODY).color(p.muted),
                 ]
                 .spacing(6),
                 horizontal_space(),
@@ -75,13 +77,16 @@ pub fn view(app: &App) -> El<'_> {
             .into()
         }
     };
-    let band = container(
-        column![topbar(app, p), header]
-            .spacing(20)
-            .padding(Padding::from([0, EDGE]).bottom(28)),
-    )
-    .width(Length::Fill)
-    .style(theme::hero(p));
+    let band = column![
+        container(
+            column![topbar(app, p), header]
+                .spacing(20)
+                .padding(Padding::from([0, EDGE]).bottom(28)),
+        )
+        .width(Length::Fill)
+        .style(theme::hero(p)),
+        container(Space::new(Length::Fill, 1)).style(theme::rule(p)),
+    ];
 
     let page: El = match app.page {
         Page::Overview => overview::view(app, p),
@@ -102,18 +107,22 @@ pub fn view(app: &App) -> El<'_> {
     .width(Length::Fill)
     .height(Length::Fill);
 
-    let base = container(row![sidebar(app, p), main])
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .style(theme::page_bg(p));
+    let base = container(row![
+        sidebar(app, p),
+        container(Space::new(1, Length::Fill)).style(theme::rule(p)),
+        main
+    ])
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .style(theme::page_bg(p));
 
     match &app.toast {
         Some(t) => {
             let toast = container(
                 text(t.text.clone())
-                    .size(14)
+                    .size(size::BODY)
                     .font(UI_BOLD)
-                    .color(p.on_accent),
+                    .color(p.on_ink),
             )
             .padding(Padding::from([12, 20]))
             .max_width(640)
@@ -135,18 +144,14 @@ pub fn view(app: &App) -> El<'_> {
 
 /// Barre supérieure : recherche à gauche, actions à droite, centrées verticalement.
 fn topbar(app: &App, p: Pal) -> El<'_> {
-    let search = row![
-        icon(Ico::Search, 20.0, p.text),
-        text_input("Rechercher un domaine, un client, une URL…", &app.search)
-            .on_input(Message::Search)
-            .on_submit(Message::SubmitSearch)
-            .size(15)
-            .padding(Padding::from([8, 0]))
-            .style(theme::input_bare(p)),
-    ]
-    .spacing(12)
-    .align_y(Alignment::Center)
-    .width(Length::Fixed(420.0));
+    let search = widgets::search_box(
+        p,
+        "Rechercher un domaine, un client, une URL…",
+        &app.search,
+        Message::Search,
+        Some(Message::SubmitSearch),
+        400.0,
+    );
 
     let mut actions = row![].spacing(6).align_y(Alignment::Center);
     if app.engine.is_some() {
@@ -198,49 +203,66 @@ fn nav_item<'a>(
     active: bool,
     msg: Message,
 ) -> El<'a> {
+    // Icône posée sur une tuile de 30 px : signature visuelle de la navigation.
+    let tile = container(icon(ico, 17.0, if active { p.on_accent } else { p.muted }))
+        .width(30)
+        .height(30)
+        .center_x(30)
+        .center_y(30)
+        .style(theme::icon_tile(p, active));
     let mut r = row![
-        icon(ico, 19.0, p.text),
+        tile,
         text(label)
-            .size(15)
-            .font(if active { UI_BOLD } else { UI })
-            .color(p.text),
+            .size(size::BODY)
+            .font(if active { UI_HEAVY } else { UI_BOLD })
+            .color(if active { p.text } else { p.muted }),
         horizontal_space(),
     ]
-    .spacing(12)
+    .spacing(10)
     .align_y(Alignment::Center);
     if let Some(b) = badge {
         r = r.push(
-            container(text(b).size(12).font(UI_BOLD).color(p.muted))
-                .padding(Padding::from([2, 8]))
-                .style(theme::fill_round(p.raised, 10.0)),
+            container(
+                text(b)
+                    .size(size::CAPTION)
+                    .font(UI_HEAVY)
+                    .color(p.on_accent),
+            )
+            .padding(Padding::from([2, 8]))
+            .style(theme::fill_round(p.accent, 10.0)),
         );
     }
     button(r)
         .width(Length::Fill)
-        .padding(Padding::from([10, 12]))
+        .padding(Padding::from([5, 8]))
         .on_press(msg)
         .style(theme::btn_nav(p, active))
         .into()
 }
 
 fn side_label<'a>(p: Pal, s: &'a str) -> El<'a> {
-    container(text(s).size(13).color(p.faint))
-        .padding(Padding::from([0, 12]))
-        .into()
+    container(
+        text(s.to_uppercase())
+            .size(size::CAPTION)
+            .font(UI_HEAVY)
+            .color(p.faint),
+    )
+    .padding(Padding::from([0, 14]).bottom(4))
+    .into()
 }
 
 fn side_info<'a>(p: Pal, ico: Ico, label: String, value: String) -> El<'a> {
     container(
         row![
-            icon(ico, 18.0, p.text),
-            text(label).size(14).color(p.text),
+            icon(ico, 16.0, p.muted),
+            text(label).size(size::SMALL).color(p.text),
             horizontal_space(),
-            text(value).size(12).color(p.muted),
+            text(value).size(size::CAPTION).color(p.muted),
         ]
         .spacing(12)
         .align_y(Alignment::Center),
     )
-    .padding(Padding::from([8, 12]))
+    .padding(Padding::from([8, 14]))
     .into()
 }
 
@@ -248,14 +270,17 @@ fn sidebar(app: &App, p: Pal) -> El<'_> {
     let logo = container(
         row![
             svg(app.brand().mark.clone()).width(30).height(30),
-            text("Ferrox").size(21).font(UI_HEAVY).color(p.text),
+            text("Ferrox")
+                .size(size::TITLE)
+                .font(UI_HEAVY)
+                .color(p.text),
         ]
         .spacing(11)
         .align_y(Alignment::Center),
     )
     .height(Length::Fixed(BAR_H))
     .center_y(Length::Fixed(BAR_H))
-    .padding(Padding::from([0, 12]));
+    .padding(Padding::from([0, 14]));
 
     let unseen = app
         .snap
@@ -336,10 +361,10 @@ fn sidebar(app: &App, p: Pal) -> El<'_> {
         .height(34)
         .center_x(34)
         .center_y(34)
-        .style(theme::fill_round(p.raised, 17.0)),
+        .style(theme::fill_round(theme::alpha(color, 0.15), 17.0)),
         column![
-            text(state).size(14).font(UI_BOLD).color(p.text),
-            text(sub).size(12).color(p.muted),
+            text(state).size(size::BODY).font(UI_BOLD).color(p.text),
+            text(sub).size(size::CAPTION).color(p.muted),
         ]
         .spacing(2),
         horizontal_space(),
@@ -371,7 +396,9 @@ fn sidebar(app: &App, p: Pal) -> El<'_> {
             Space::with_height(28),
             listen,
             vertical_space(),
-            container(footer).padding(Padding::from([0, 12])),
+            container(footer)
+                .padding(Padding::from([12, 14]))
+                .style(theme::card_soft(p)),
         ]
         .padding(Padding::from([0, 20]).bottom(24)),
     )

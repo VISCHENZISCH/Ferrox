@@ -49,7 +49,7 @@ pub fn view(app: &App, p: Pal) -> El<'_> {
                             .then(|| (Ico::Filter, Message::QuickBlock(a.target.clone()))),
                         inverted: Some(a.id) == newest_unseen,
                         soft: a.id <= app.alerts_cleared_at,
-                        accent: (a.severity >= Severity::High).then_some(p.danger),
+                        accent: (a.severity >= Severity::Medium).then(|| p.severity(a.severity)),
                         extra: None,
                     },
                 )

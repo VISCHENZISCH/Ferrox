@@ -2,7 +2,7 @@
 
 use crate::app::Message;
 use crate::icons::{icon, Ico};
-use crate::theme::{self, Pal, MONO, UI, UI_BOLD};
+use crate::theme::{self, size, Pal, MONO, UI, UI_BOLD, UI_HEAVY};
 use iced::widget::{
     button, column, container, horizontal_space, row, scrollable, text, text_input, toggler, Space,
 };
@@ -12,30 +12,35 @@ pub type El<'a> = Element<'a, Message>;
 
 /// Espacements (grille de 4 px).
 pub const GAP: u16 = 16;
-pub const PAD: u16 = 20;
 
 /// Petit libellé discret (en-têtes de colonnes, légendes).
 pub fn caps<'a>(s: &str, p: Pal) -> iced::widget::Text<'a> {
-    text(s.to_string()).size(12).color(p.muted)
+    text(s.to_string()).size(size::CAPTION).color(p.muted)
 }
 
 /// Titre de section.
 pub fn section_title<'a>(s: &str, p: Pal) -> iced::widget::Text<'a> {
-    text(s.to_string()).size(20).font(UI_BOLD).color(p.text)
+    text(s.to_string())
+        .size(size::TITLE)
+        .font(UI_HEAVY)
+        .color(p.text)
 }
 
-/// Compteur encadré à droite d'un titre de section.
+/// Compteur teinté à droite d'un titre de section.
 pub fn counter<'a>(p: Pal, n: usize) -> El<'a> {
     container(
         row![
-            text(n.to_string()).size(14).font(UI_BOLD).color(p.text),
-            icon(Ico::Sort, 15.0, p.muted),
+            text(n.to_string())
+                .size(size::CAPTION)
+                .font(UI_HEAVY)
+                .color(p.text),
+            icon(Ico::Sort, 14.0, p.accent_ink),
         ]
         .spacing(6)
         .align_y(Alignment::Center),
     )
-    .padding(Padding::from([5, 9]))
-    .style(theme::outline(p))
+    .padding(Padding::from([5, 10]))
+    .style(theme::accent_chip(p))
     .into()
 }
 
@@ -46,16 +51,19 @@ pub fn card<'a>(
     right: Option<El<'a>>,
     body: El<'a>,
 ) -> El<'a> {
-    let mut head = row![text(title.to_string()).size(16).font(UI_BOLD).color(p.text)]
-        .spacing(10)
-        .align_y(Alignment::Center)
-        .height(32);
+    let mut head = row![text(title.to_string())
+        .size(size::HEADING)
+        .font(UI_HEAVY)
+        .color(p.text)]
+    .spacing(10)
+    .align_y(Alignment::Center)
+    .height(32);
     head = head.push(horizontal_space());
     if let Some(r) = right {
         head = head.push(r);
     }
-    container(column![head, body].spacing(14))
-        .padding(Padding::from([18, PAD]))
+    container(column![head, body].spacing(16))
+        .padding(Padding::from([20, 24]))
         .width(Length::Fill)
         .style(theme::card(p))
         .into()
@@ -83,15 +91,15 @@ pub fn btn<'a>(p: Pal, label: &str, ico: Option<Ico>, kind: Kind, msg: Option<Me
     }
     r = r.push(
         text(label.to_string())
-            .size(14)
-            .font(UI_BOLD)
+            .size(size::BODY)
+            .font(UI_HEAVY)
             .color(fg)
             .wrapping(iced::widget::text::Wrapping::None),
     );
     let pad = match kind {
-        Kind::Primary => Padding::from([10, 18]),
-        Kind::Text => Padding::from([8, 10]),
-        _ => Padding::from([8, 14]),
+        Kind::Primary => Padding::from([11, 20]),
+        Kind::Text => Padding::from([9, 12]),
+        _ => Padding::from([10, 16]),
     };
     let b = button(r).padding(pad).on_press_maybe(msg);
     match kind {
@@ -113,28 +121,47 @@ pub fn icon_btn<'a>(p: Pal, ico: Ico, color: Color, msg: Message) -> El<'a> {
 
 /// Étiquette neutre ; la couleur ne sert qu'au texte.
 pub fn chip<'a>(p: Pal, label: &str, color: Color) -> El<'a> {
-    container(text(label.to_string()).size(12).font(UI_BOLD).color(color))
-        .padding(Padding::from([3, 9]))
-        .style(theme::chip(color, p))
-        .into()
+    container(
+        text(label.to_string())
+            .size(size::CAPTION)
+            .font(UI_BOLD)
+            .color(color),
+    )
+    .padding(Padding::from([3, 9]))
+    .style(theme::chip(color, p))
+    .into()
 }
 
-/// Puce encadrée avec icône (heure, compteur), comme dans les cartes de la référence.
-pub fn pill<'a>(ico: Ico, label: String, fg: Color, border: Color) -> El<'a> {
+/// Méta-donnée avec icône (heure, compteur) : sans cadre, discrète.
+pub fn pill<'a>(ico: Ico, label: String, fg: Color, _border: Color) -> El<'a> {
+    row![
+        icon(ico, 14.0, fg),
+        text(label).size(size::CAPTION).font(UI_BOLD).color(fg)
+    ]
+    .spacing(6)
+    .align_y(Alignment::Center)
+    .into()
+}
+
+/// État d'un échange : point et libellé sur un fond teinté de la même couleur.
+pub fn state_chip<'a>(p: Pal, label: &str, color: Color) -> El<'a> {
     container(
-        row![icon(ico, 14.0, fg), text(label).size(12).color(fg)]
-            .spacing(6)
-            .align_y(Alignment::Center),
+        row![
+            container(Space::new(6, 6)).style(theme::fill_round(color, 3.0)),
+            text(label.to_string())
+                .size(size::CAPTION)
+                .font(UI_HEAVY)
+                .color(color)
+                .wrapping(iced::widget::text::Wrapping::None),
+        ]
+        .spacing(6)
+        .align_y(Alignment::Center),
     )
-    .padding(Padding::from([4, 9]))
-    .style(move |_| container::Style {
-        border: iced::Border {
-            color: border,
-            width: 1.0,
-            radius: theme::RADIUS_SM.into(),
-        },
-        ..Default::default()
-    })
+    .padding(Padding::from([3, 8]))
+    .style(theme::fill_round(
+        theme::alpha(color, if p.dark { 0.14 } else { 0.1 }),
+        6.0,
+    ))
     .into()
 }
 
@@ -142,7 +169,7 @@ pub fn pill<'a>(ico: Ico, label: String, fg: Color, border: Color) -> El<'a> {
 pub fn tag<'a>(p: Pal, label: &str, msg: Message) -> El<'a> {
     container(
         row![
-            text(label.to_string()).size(13).color(p.text),
+            text(label.to_string()).size(size::SMALL).color(p.text),
             button(icon(Ico::Close, 13.0, p.muted))
                 .padding(3)
                 .on_press(msg)
@@ -160,10 +187,14 @@ pub fn seg<'a>(p: Pal, items: Vec<(String, bool, Message)>) -> El<'a> {
     let mut r = row![].spacing(2);
     for (label, active, msg) in items {
         r = r.push(
-            button(text(label).size(13).font(if active { UI_BOLD } else { UI }))
-                .padding(Padding::from([6, 14]))
-                .on_press(msg)
-                .style(theme::btn_seg(p, active)),
+            button(
+                text(label)
+                    .size(size::SMALL)
+                    .font(if active { UI_BOLD } else { UI }),
+            )
+            .padding(Padding::from([6, 14]))
+            .on_press(msg)
+            .style(theme::btn_seg(p, active)),
         );
     }
     container(r).padding(3).style(theme::seg_track(p)).into()
@@ -177,16 +208,47 @@ pub fn field<'a>(
     on: impl Fn(String) -> Message + 'a,
 ) -> El<'a> {
     column![
-        text(label.to_string()).size(13).color(p.muted),
+        text(label.to_string())
+            .size(size::SMALL)
+            .font(UI_BOLD)
+            .color(p.muted),
         text_input(placeholder, value)
             .on_input(on)
             .font(MONO)
-            .size(14)
-            .padding(Padding::from([9, 12]))
+            .size(size::BODY)
+            .padding(Padding::from([11, 14]))
             .style(theme::input(p)),
     ]
     .spacing(7)
     .width(Length::Fill)
+    .into()
+}
+
+/// Boîte de recherche remplie (barre supérieure, tableaux).
+pub fn search_box<'a>(
+    p: Pal,
+    placeholder: &str,
+    value: &str,
+    on: impl Fn(String) -> Message + 'a,
+    submit: Option<Message>,
+    width: f32,
+) -> El<'a> {
+    let mut input = text_input(placeholder, value)
+        .on_input(on)
+        .size(size::BODY)
+        .padding(Padding::from([10, 0]))
+        .style(theme::input_bare(p));
+    if let Some(m) = submit {
+        input = input.on_submit(m);
+    }
+    container(
+        row![icon(Ico::Search, 18.0, p.muted), input]
+            .spacing(10)
+            .align_y(Alignment::Center),
+    )
+    .padding(Padding::from([0, 14]))
+    .width(Length::Fixed(width))
+    .style(theme::seg_track(p))
     .into()
 }
 
@@ -199,13 +261,16 @@ pub fn secret_field<'a>(
     on: impl Fn(String) -> Message + 'a,
 ) -> El<'a> {
     column![
-        text(label.to_string()).size(13).color(p.muted),
+        text(label.to_string())
+            .size(size::SMALL)
+            .font(UI_BOLD)
+            .color(p.muted),
         text_input(placeholder, value)
             .on_input(on)
             .secure(true)
             .font(MONO)
-            .size(14)
-            .padding(Padding::from([9, 12]))
+            .size(size::BODY)
+            .padding(Padding::from([11, 14]))
             .style(theme::input(p)),
     ]
     .spacing(7)
@@ -225,11 +290,11 @@ pub fn input_add<'a>(
             .on_input(on)
             .on_submit(submit.clone())
             .font(MONO)
-            .size(14)
-            .padding(Padding::from([9, 12]))
+            .size(size::BODY)
+            .padding(Padding::from([11, 14]))
             .style(theme::input(p)),
-        button(icon(Ico::Plus, 17.0, p.on_accent))
-            .padding(10)
+        button(icon(Ico::Plus, 18.0, p.on_accent))
+            .padding(13)
             .on_press(submit)
             .style(theme::btn_primary(p)),
     ]
@@ -245,9 +310,13 @@ pub fn toggle_row<'a>(
     value: bool,
     on: impl Fn(bool) -> Message + 'a,
 ) -> El<'a> {
-    let mut col = column![text(label.to_string()).size(14).font(UI_BOLD).color(p.text)].spacing(3);
+    let mut col = column![text(label.to_string())
+        .size(size::BODY)
+        .font(UI_BOLD)
+        .color(p.text)]
+    .spacing(3);
     if !hint.is_empty() {
-        col = col.push(text(hint.to_string()).size(13).color(p.muted));
+        col = col.push(text(hint.to_string()).size(size::SMALL).color(p.muted));
     }
     row![
         col.width(Length::Fill),
@@ -288,8 +357,11 @@ pub fn empty_state<'a>(p: Pal, ico: Ico, title: &str, hint: &str) -> El<'a> {
     container(
         column![
             icon(ico, 24.0, p.faint),
-            text(title.to_string()).size(15).font(UI_BOLD).color(p.text),
-            text(hint.to_string()).size(13).color(p.muted),
+            text(title.to_string())
+                .size(size::HEADING)
+                .font(UI_BOLD)
+                .color(p.text),
+            text(hint.to_string()).size(size::SMALL).color(p.muted),
         ]
         .spacing(8)
         .align_x(Alignment::Center),
@@ -301,7 +373,7 @@ pub fn empty_state<'a>(p: Pal, ico: Ico, title: &str, hint: &str) -> El<'a> {
 }
 
 pub fn hint<'a>(p: Pal, s: &str) -> El<'a> {
-    text(s.to_string()).size(13).color(p.muted).into()
+    text(s.to_string()).size(size::SMALL).color(p.muted).into()
 }
 
 /// Zone défilante sans barre visible.

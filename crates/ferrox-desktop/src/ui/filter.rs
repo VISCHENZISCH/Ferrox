@@ -7,13 +7,16 @@ use super::widgets::{
 use crate::app::{App, ListKind, Message, Toggle};
 use crate::fmt;
 use crate::icons::{icon, Ico};
-use crate::theme::{self, Pal, UI_BOLD};
+use crate::theme::{self, size, Pal, UI_BOLD};
 use iced::widget::{column, container, horizontal_space, row, text, toggler, Space};
 use iced::{Alignment, Length, Padding};
 
 fn tags<'a>(p: Pal, items: &[String], kind: ListKind, empty: &str) -> El<'a> {
     if items.is_empty() {
-        return text(empty.to_string()).size(12).color(p.faint).into();
+        return text(empty.to_string())
+            .size(size::CAPTION)
+            .color(p.faint)
+            .into();
     }
     let mut r = row![].spacing(6);
     for (i, it) in items.iter().enumerate() {
@@ -30,8 +33,8 @@ pub fn view(app: &App, p: Pal) -> El<'_> {
     for (i, l) in f.lists.iter().enumerate() {
         let status = app.list_status.iter().find(|r| r.name == l.name);
         let status_el: El = match status {
-            Some(r) if r.ok => mono(&r.message, 11, p.ok).into(),
-            Some(r) => mono(fmt::truncate(&r.message, 40), 11, p.danger).into(),
+            Some(r) if r.ok => mono(&r.message, size::BODY, p.ok).into(),
+            Some(r) => mono(fmt::truncate(&r.message, 40), size::BODY, p.danger).into(),
             None => Space::new(0, 0).into(),
         };
         lists = lists.push(
@@ -42,12 +45,15 @@ pub fn view(app: &App, p: Pal) -> El<'_> {
                     .style(theme::toggle(p)),
                 column![
                     row![
-                        text(l.name.clone()).size(14).font(UI_BOLD).color(p.text),
+                        text(l.name.clone())
+                            .size(size::BODY)
+                            .font(UI_BOLD)
+                            .color(p.text),
                         chip(p, &l.category, category_color(p, &l.category)),
                     ]
                     .spacing(8)
                     .align_y(Alignment::Center),
-                    mono(fmt::truncate(&l.url, 64), 11, p.faint),
+                    mono(fmt::truncate(&l.url, 64), size::BODY, p.faint),
                 ]
                 .spacing(3)
                 .width(Length::Fill),
@@ -72,7 +78,7 @@ pub fn view(app: &App, p: Pal) -> El<'_> {
     .align_y(Alignment::Center)]
     .spacing(4);
     for e in &app.filter_errors {
-        lists_footer = lists_footer.push(text(e.clone()).size(12).color(p.warn));
+        lists_footer = lists_footer.push(text(e.clone()).size(size::CAPTION).color(p.warn));
     }
     let update_btn = if app.updating {
         btn(p, "Téléchargement…", Some(Ico::Refresh), Kind::Ghost, None)
@@ -126,7 +132,7 @@ pub fn view(app: &App, p: Pal) -> El<'_> {
         p,
         "Blocage manuel",
         Some(Ico::Close),
-        Some(mono(f.custom_block.len(), 12, p.muted).into()),
+        Some(mono(f.custom_block.len(), size::CAPTION, p.muted).into()),
         column![
             input_add(
                 p,
@@ -150,7 +156,7 @@ pub fn view(app: &App, p: Pal) -> El<'_> {
         p,
         "Toujours autorisés",
         Some(Ico::Check),
-        Some(mono(f.allow.len(), 12, p.muted).into()),
+        Some(mono(f.allow.len(), size::CAPTION, p.muted).into()),
         column![
             hint(p, "Prioritaires sur toutes les listes (faux positifs)."),
             input_add(
@@ -207,14 +213,16 @@ pub fn view(app: &App, p: Pal) -> El<'_> {
             if dirty {
                 row![
                     icon(Ico::Alert, 14.0, p.warn),
-                    text("Modifications non appliquées").size(13).color(p.warn)
+                    text("Modifications non appliquées")
+                        .size(size::SMALL)
+                        .color(p.warn)
                 ]
                 .spacing(8)
                 .align_y(Alignment::Center)
             } else {
                 row![
                     icon(Ico::Check, 14.0, p.ok),
-                    text("Filtrage à jour").size(13).color(p.muted)
+                    text("Filtrage à jour").size(size::SMALL).color(p.muted)
                 ]
                 .spacing(8)
                 .align_y(Alignment::Center)

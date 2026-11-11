@@ -23,6 +23,7 @@ Version « Rempart » : sécuriser l'exposition. Aucun constat critique ou majeu
 - Intégration continue (fmt, clippy, tests sur Linux, Windows et macOS) et publication automatique des exécutables.
 
 ### Modifié
+- Interface de bureau redessinée, palette « Nocturne » : violet #7C3AED pour les actions, noirs et gris neutres en sombre, couleurs d'état distinctes (autorisé, bloqué, inspecté, tunnel) et gravité graduée (gris, orange, rouge, magenta) ; police IBM Plex Sans et échelle de tailles unique ; champs épurés avec contour violet au focus ; 28 icônes redessinées, tuiles d'icônes dans la navigation ; colonne « État » dans le trafic web.
 - Les seuils de détection enregistrés dans l'interface s'appliquent à chaud, sans redémarrer le moteur ni perdre les statistiques (FP-05, C-16).
 - `idle_timeout_s` désigne désormais l'inactivité des tunnels ; l'attente de la réponse amont a sa propre clé `response_timeout_s` (60 s) (C-19).
 - Profil release : `panic = "unwind"` et `overflow-checks = true` ; une panique dans une tâche réseau n'arrête plus tout le service (C-18).

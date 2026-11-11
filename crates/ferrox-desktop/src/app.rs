@@ -116,6 +116,79 @@ pub struct Toast {
     pub at: Instant,
 }
 
+/// Débit du proxy en temps réel, calculé à partir des compteurs d'octets du moteur.
+#[derive(Default)]
+pub struct Throughput {
+    last: Option<(Instant, u64, u64)>,
+    /// Débits lissés, en octets par seconde.
+    pub up: f64,
+    pub down: f64,
+    /// Débits totaux de la dernière minute, pour l'échelle de la jauge.
+    recent: std::collections::VecDeque<f64>,
+}
+
+impl Throughput {
+    const WINDOW: usize = 120; // 60 s à 2 mesures par seconde
+    const MIN_SCALE: f64 = 100.0 * 1024.0; // 100 Ko/s
+
+    pub fn update(&mut self, up_total: u64, down_total: u64) {
+        let now = Instant::now();
+        if let Some((t, u, d)) = self.last {
+            let dt = now.duration_since(t).as_secs_f64();
+            if up_total < u || down_total < d {
+                // Moteur redémarré : les compteurs repartent de zéro.
+                *self = Self::default();
+            } else if dt > 0.05 {
+                let ru = (up_total - u) as f64 / dt;
+                let rd = (down_total - d) as f64 / dt;
+                // Lissage exponentiel : l'aiguille suit le trafic sans trembler.
+                self.up = 0.5 * self.up + 0.5 * ru;
+                self.down = 0.5 * self.down + 0.5 * rd;
+                self.recent.push_back(ru + rd);
+                while self.recent.len() > Self::WINDOW {
+                    self.recent.pop_front();
+                }
+            }
+        }
+        self.last = Some((now, up_total, down_total));
+    }
+
+    #[cfg(test)]
+    fn with_peak(peak: f64) -> Self {
+        let mut t = Self::default();
+        t.recent.push_back(peak);
+        t
+    }
+
+    pub fn total(&self) -> f64 {
+        self.up + self.down
+    }
+
+    /// Fond d'échelle « rond » au-dessus du pic récent : 100, 200, 500 Ko/s, 1, 2, 5, 10 Mo/s…
+    pub fn scale(&self) -> f64 {
+        let peak = self
+            .recent
+            .iter()
+            .copied()
+            .fold(self.total(), f64::max)
+            .max(Self::MIN_SCALE);
+        let mut unit = 1024.0; // Ko
+        loop {
+            for step in [100.0, 200.0, 500.0] {
+                if step * unit >= peak {
+                    return step * unit;
+                }
+            }
+            for step in [1.0, 2.0, 5.0, 10.0, 20.0, 50.0] {
+                if step * unit * 1024.0 >= peak {
+                    return step * unit * 1024.0;
+                }
+            }
+            unit *= 1024.0;
+        }
+    }
+}
+
 /// Champs texte de la page Paramètres (validés à l'enregistrement).
 #[derive(Default, Clone)]
 pub struct Form {
@@ -310,6 +383,7 @@ pub struct App {
     pub engine: Option<Engine>,
     pub engine_error: Option<String>,
     pub snap: Snapshot,
+    pub rate: Throughput,
     pub page: Page,
     pub dark: bool,
     pub paused: bool,
@@ -363,6 +437,7 @@ impl App {
             engine: None,
             engine_error: None,
             snap: Snapshot::default(),
+            rate: Throughput::default(),
             page: match std::env::var("FERROX_PAGE").as_deref() {
                 Ok("traffic") => Page::Traffic,
                 Ok("dns") => Page::Dns,
@@ -476,6 +551,8 @@ impl App {
                 series: 120,
                 top: 10,
             });
+            let t = self.snap.totals;
+            self.rate.update(t.live_bytes_up, t.live_bytes_down);
         }
     }
 
@@ -789,5 +866,31 @@ fn shortcut(key: iced::keyboard::Key, mods: iced::keyboard::Modifiers) -> Option
 impl Drop for App {
     fn drop(&mut self) {
         self.stop_engine();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Throughput;
+
+    #[test]
+    fn gauge_scale_is_round() {
+        const K: f64 = 1024.0;
+        assert_eq!(Throughput::with_peak(0.0).scale(), 100.0 * K);
+        assert_eq!(Throughput::with_peak(150.0 * K).scale(), 200.0 * K);
+        assert_eq!(Throughput::with_peak(578.0 * K).scale(), K * K);
+        assert_eq!(Throughput::with_peak(3.0 * K * K).scale(), 5.0 * K * K);
+        assert_eq!(Throughput::with_peak(70.0 * K * K).scale(), 100.0 * K * K);
+    }
+
+    #[test]
+    fn rate_follows_counters_and_resets() {
+        let mut t = Throughput::default();
+        t.update(0, 0);
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        t.update(0, 1_000_000);
+        assert!(t.down > 0.0 && t.up == 0.0);
+        t.update(0, 0); // moteur redémarré
+        assert_eq!(t.total(), 0.0);
     }
 }

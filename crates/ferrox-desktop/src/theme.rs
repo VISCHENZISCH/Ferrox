@@ -1,30 +1,56 @@
-//! Identité visuelle Ferrox : sobre et monochrome.
-//! Noir, blanc, gris chauds et un bandeau beige ; une seule couleur d'alerte (rouge),
-//! réservée aux menaces et aux blocages.
+//! Identité visuelle Ferrox, palette « Nocturne » : surfaces neutres (blanc, ou noirs et gris
+//! sans teinte en sombre), violet #7C3AED pour les actions et l'élément actif. Les couleurs
+//! d'état ne se confondent jamais avec la marque : vert autorisé, rouge bloqué, cyan inspecté
+//! (interception TLS), gris tunnel ; gravité gris, orange, rouge, magenta.
+//! Une seule famille (IBM Plex Sans) et une échelle fixe (`size`).
 
 use ferrox_core::event::Severity;
 use iced::font::Weight;
 use iced::widget::{button, container, scrollable, text_input, toggler};
 use iced::{Background, Border, Color, Font, Shadow, Theme, Vector};
 
-pub const UI: Font = Font::with_name("Manrope");
+const FAMILY: &str = "IBM Plex Sans";
+pub const UI: Font = Font::with_name(FAMILY);
 pub const UI_BOLD: Font = Font {
     weight: Weight::Medium,
-    ..Font::with_name("Manrope")
+    ..Font::with_name(FAMILY)
 };
 pub const UI_HEAVY: Font = Font {
     weight: Weight::Semibold,
-    ..Font::with_name("Manrope")
+    ..Font::with_name(FAMILY)
+};
+/// Chiffres clés.
+pub const UI_STRONG: Font = Font {
+    weight: Weight::Bold,
+    ..Font::with_name(FAMILY)
 };
 /// Données (domaines, adresses, chiffres) : même famille, pour une interface homogène.
 pub const MONO: Font = UI;
 /// Extraits de commandes uniquement.
 pub const CODE: Font = Font::with_name("JetBrains Mono");
 
+/// Échelle typographique : toute taille de texte de l'interface vient d'ici.
+pub mod size {
+    /// Chiffres clés et titre de page.
+    pub const DISPLAY: u16 = 28;
+    /// Titres de section.
+    pub const TITLE: u16 = 20;
+    /// Titres de cartes, marque.
+    pub const HEADING: u16 = 16;
+    /// Navigation, boutons, champs, valeurs.
+    pub const BODY: u16 = 14;
+    /// Descriptions, aides, sous-titres.
+    pub const SMALL: u16 = 13;
+    /// Libellés, puces, en-têtes de colonnes.
+    pub const CAPTION: u16 = 12;
+    /// Axes des graphiques.
+    pub const MICRO: f32 = 11.0;
+}
+
 /// Rayon des cartes et panneaux.
-pub const RADIUS: f32 = 12.0;
+pub const RADIUS: f32 = 16.0;
 /// Rayon des contrôles (boutons, champs, puces).
-pub const RADIUS_SM: f32 = 8.0;
+pub const RADIUS_SM: f32 = 10.0;
 
 const fn hex(v: u32) -> Color {
     Color {
@@ -37,6 +63,17 @@ const fn hex(v: u32) -> Color {
 
 pub fn alpha(c: Color, a: f32) -> Color {
     Color { a, ..c }
+}
+
+/// Mélange opaque de deux couleurs (`t` = part de `a`). Préférable à la transparence pour du
+/// texte posé sur une couleur vive : le rendu reste net et le contraste prévisible.
+pub fn mix(a: Color, b: Color, t: f32) -> Color {
+    Color {
+        r: a.r * t + b.r * (1.0 - t),
+        g: a.g * t + b.g * (1.0 - t),
+        b: a.b * t + b.b * (1.0 - t),
+        a: 1.0,
+    }
 }
 
 pub fn hex_str(c: Color) -> String {
@@ -54,7 +91,7 @@ pub struct Pal {
     /// Fond général.
     pub bg: Color,
     pub sidebar: Color,
-    /// Bandeau supérieur (beige).
+    /// Bandeau supérieur (teinté de jaune).
     pub hero: Color,
     /// Cartes.
     pub surface: Color,
@@ -65,59 +102,90 @@ pub struct Pal {
     pub text: Color,
     pub muted: Color,
     pub faint: Color,
-    /// Action principale : noir en clair, blanc en sombre.
+    /// Couleur principale : violet (boutons, élément actif).
     pub accent: Color,
+    /// Survol et appui des boutons principaux.
+    pub accent_hover: Color,
+    /// Texte posé sur la couleur principale.
     pub on_accent: Color,
+    /// Violet lisible en texte ou en icône sur le fond du thème.
+    pub accent_ink: Color,
+    /// Fond teinté (élément actif, puces).
+    pub accent_soft: Color,
+    /// Série principale des graphiques.
+    pub series: Color,
+    /// Trafic déchiffré par l'interception TLS.
+    pub inspect: Color,
+    /// Gravité moyenne (orange).
+    pub medium: Color,
+    /// Neutre fort (notifications, infobulles).
+    pub ink: Color,
+    pub on_ink: Color,
     /// Séries de données secondaires (gris).
     pub steel: Color,
     pub ok: Color,
     pub warn: Color,
     pub danger: Color,
-    #[allow(dead_code)]
     pub crit: Color,
 }
 
 impl Pal {
     pub const LIGHT: Pal = Pal {
         dark: false,
-        bg: hex(0xFFFFFF),
+        bg: hex(0xFAFAFA),
         sidebar: hex(0xFFFFFF),
-        hero: hex(0xEFEFE7),
+        hero: hex(0xFFFFFF),
         surface: hex(0xFFFFFF),
-        raised: hex(0xF3F3F0),
-        line: hex(0xE6E6E1),
-        line_strong: hex(0xD2D2CB),
-        text: hex(0x141414),
-        muted: hex(0x6E6E6A),
-        faint: hex(0xA9A9A3),
-        accent: hex(0x161616),
+        raised: hex(0xF4F4F5),
+        line: hex(0xEBEBEB),
+        line_strong: hex(0xD9D9D9),
+        text: hex(0x1A1A1A),
+        muted: hex(0x6E6E6E),
+        faint: hex(0xA3A3A3),
+        accent: hex(0x7C3AED),
+        accent_hover: hex(0x6D28D9),
         on_accent: hex(0xFFFFFF),
-        steel: hex(0x8C8C86),
-        ok: hex(0x3C8A55),
-        warn: hex(0x6E6E6A),
-        danger: hex(0xD2412C),
-        crit: hex(0xB0281A),
+        accent_ink: hex(0x6D3FD9),
+        accent_soft: hex(0xF1EBFE),
+        series: hex(0x7C3AED),
+        inspect: hex(0x0E7490),
+        medium: hex(0xB45309),
+        ink: hex(0x1A1A1A),
+        on_ink: hex(0xFFFFFF),
+        steel: hex(0xBDBDBD),
+        ok: hex(0x0A8754),
+        warn: hex(0xB45309),
+        danger: hex(0xCF304A),
+        crit: hex(0xB0247A),
     };
 
     pub const DARK: Pal = Pal {
         dark: true,
-        bg: hex(0x111111),
-        sidebar: hex(0x111111),
-        hero: hex(0x1B1B19),
-        surface: hex(0x161616),
-        raised: hex(0x222220),
-        line: hex(0x272725),
-        line_strong: hex(0x3A3A37),
-        text: hex(0xF1F1EC),
-        muted: hex(0x9B9B95),
-        faint: hex(0x5F5F5A),
-        accent: hex(0xF1F1EC),
-        on_accent: hex(0x111111),
-        steel: hex(0x77776F),
-        ok: hex(0x5FB27A),
-        warn: hex(0x9B9B95),
-        danger: hex(0xF0624C),
-        crit: hex(0xFF7A66),
+        bg: hex(0x0D0D0D),
+        sidebar: hex(0x121212),
+        hero: hex(0x121212),
+        surface: hex(0x181818),
+        raised: hex(0x222222),
+        line: hex(0x262626),
+        line_strong: hex(0x363636),
+        text: hex(0xEAEAEA),
+        muted: hex(0x8F8F8F),
+        faint: hex(0x5E5E5E),
+        accent: hex(0x7C3AED),
+        accent_hover: hex(0x6D28D9),
+        on_accent: hex(0xFFFFFF),
+        accent_ink: hex(0xA78BFA),
+        accent_soft: hex(0x241A38),
+        series: hex(0xA78BFA),
+        inspect: hex(0x22D3EE),
+        medium: hex(0xFF8A3D),
+        ink: hex(0xEAEAEA),
+        on_ink: hex(0x121212),
+        steel: hex(0x4A4A4A),
+        ok: hex(0x2EBD85),
+        warn: hex(0xFF8A3D),
+        danger: hex(0xF6465D),
+        crit: hex(0xFF4FB8),
     };
 
     pub fn get(dark: bool) -> Pal {
@@ -128,12 +196,11 @@ impl Pal {
         }
     }
 
-    /// Couleur par gravité, réservée aux vues d'alertes à venir.
-    #[allow(dead_code)]
+    /// Couleur par gravité : gris, orange, rouge, magenta.
     pub fn severity(&self, s: Severity) -> Color {
         match s {
             Severity::Low => self.faint,
-            Severity::Medium => self.muted,
+            Severity::Medium => self.medium,
             Severity::High => self.danger,
             Severity::Critical => self.crit,
         }
@@ -192,6 +259,14 @@ pub fn hero(p: Pal) -> impl Fn(&Theme) -> container::Style {
     }
 }
 
+/// Filet de séparation sous le bandeau et à droite de la barre latérale.
+pub fn rule(p: Pal) -> impl Fn(&Theme) -> container::Style {
+    move |_| container::Style {
+        background: Some(p.line.into()),
+        ..Default::default()
+    }
+}
+
 pub fn card(p: Pal) -> impl Fn(&Theme) -> container::Style {
     move |_| container::Style {
         background: Some(p.surface.into()),
@@ -201,7 +276,7 @@ pub fn card(p: Pal) -> impl Fn(&Theme) -> container::Style {
     }
 }
 
-/// Carte mise en avant (inversée : noire en clair, claire en sombre).
+/// Carte mise en avant, en couleur principale.
 pub fn card_inverted(p: Pal) -> impl Fn(&Theme) -> container::Style {
     move |_| container::Style {
         background: Some(p.accent.into()),
@@ -230,16 +305,6 @@ pub fn raised(p: Pal) -> impl Fn(&Theme) -> container::Style {
     }
 }
 
-/// Cadre fin sans fond (puces de date, compteurs).
-pub fn outline(p: Pal) -> impl Fn(&Theme) -> container::Style {
-    move |_| container::Style {
-        background: None,
-        border: border(p.line_strong, 1.0, RADIUS_SM),
-        text_color: Some(p.text),
-        ..Default::default()
-    }
-}
-
 pub fn fill(color: Color) -> impl Fn(&Theme) -> container::Style {
     fill_round(color, 0.0)
 }
@@ -263,9 +328,9 @@ pub fn chip(color: Color, p: Pal) -> impl Fn(&Theme) -> container::Style {
 
 pub fn toast(p: Pal, _color: Color) -> impl Fn(&Theme) -> container::Style {
     move |_| container::Style {
-        background: Some(p.accent.into()),
-        border: border(p.accent, 1.0, RADIUS),
-        text_color: Some(p.on_accent),
+        background: Some(p.ink.into()),
+        border: border(p.ink, 1.0, RADIUS),
+        text_color: Some(p.on_ink),
         shadow: Shadow {
             color: alpha(Color::BLACK, if p.dark { 0.5 } else { 0.18 }),
             offset: Vector::new(0.0, 8.0),
@@ -279,15 +344,15 @@ pub fn toast(p: Pal, _color: Color) -> impl Fn(&Theme) -> container::Style {
 pub fn btn_primary(p: Pal) -> impl Fn(&Theme, button::Status) -> button::Style {
     move |_, s| {
         let bg = match s {
-            button::Status::Hovered => alpha(p.accent, 0.86),
-            button::Status::Pressed => alpha(p.accent, 0.76),
-            button::Status::Disabled => alpha(p.accent, 0.25),
+            button::Status::Hovered => p.accent_hover,
+            button::Status::Pressed => mix(p.accent_hover, Color::BLACK, 0.88),
+            button::Status::Disabled => alpha(p.accent, 0.35),
             _ => p.accent,
         };
         button::Style {
             background: Some(bg.into()),
             text_color: p.on_accent,
-            border: border(Color::TRANSPARENT, 0.0, RADIUS_SM + 2.0),
+            border: border(Color::TRANSPARENT, 0.0, RADIUS_SM),
             shadow: Shadow::default(),
         }
     }
@@ -295,19 +360,20 @@ pub fn btn_primary(p: Pal) -> impl Fn(&Theme, button::Status) -> button::Style {
 
 pub fn btn_ghost(p: Pal) -> impl Fn(&Theme, button::Status) -> button::Style {
     move |_, s| {
+        // Bouton secondaire : fond gris plein, sans contour.
         let bg = match s {
-            button::Status::Hovered => Some(p.raised),
-            button::Status::Pressed => Some(p.line),
-            _ => None,
+            button::Status::Hovered => p.line_strong,
+            button::Status::Pressed => p.line,
+            _ => p.raised,
         };
         button::Style {
-            background: bg.map(Background::Color),
+            background: Some(Background::Color(bg)),
             text_color: if matches!(s, button::Status::Disabled) {
                 p.faint
             } else {
                 p.text
             },
-            border: border(p.line_strong, 1.0, RADIUS_SM + 2.0),
+            border: border(Color::TRANSPARENT, 0.0, RADIUS_SM),
             shadow: Shadow::default(),
         }
     }
@@ -338,7 +404,7 @@ pub fn btn_danger(p: Pal) -> impl Fn(&Theme, button::Status) -> button::Style {
                 None
             },
             text_color: p.danger,
-            border: border(alpha(p.danger, 0.45), 1.0, RADIUS_SM + 2.0),
+            border: border(alpha(p.danger, 0.45), 1.0, RADIUS_SM),
             shadow: Shadow::default(),
         }
     }
@@ -364,12 +430,12 @@ pub fn btn_nav(p: Pal, active: bool) -> impl Fn(&Theme, button::Status) -> butto
             background: if active {
                 Some(p.raised.into())
             } else if hovered {
-                Some(alpha(p.raised, 0.6).into())
+                Some(alpha(p.raised, 0.5).into())
             } else {
                 None
             },
             text_color: p.text,
-            border: border(Color::TRANSPARENT, 0.0, RADIUS_SM + 2.0),
+            border: border(Color::TRANSPARENT, 0.0, RADIUS_SM),
             shadow: Shadow::default(),
         }
     }
@@ -397,11 +463,30 @@ pub fn btn_seg(p: Pal, active: bool) -> impl Fn(&Theme, button::Status) -> butto
     }
 }
 
+/// Tuile d'icône de la navigation : violet plein pour la page active, invisible sinon.
+pub fn icon_tile(p: Pal, active: bool) -> impl Fn(&Theme) -> container::Style {
+    move |_| container::Style {
+        background: active.then(|| p.accent.into()),
+        border: border(Color::TRANSPARENT, 0.0, 8.0),
+        ..Default::default()
+    }
+}
+
+/// Puce teintée de la couleur principale (compteurs, badges).
+pub fn accent_chip(p: Pal) -> impl Fn(&Theme) -> container::Style {
+    move |_| container::Style {
+        background: Some(p.accent_soft.into()),
+        border: border(Color::TRANSPARENT, 0.0, RADIUS_SM),
+        text_color: Some(p.text),
+        ..Default::default()
+    }
+}
+
 /// Fond des contrôles segmentés.
 pub fn seg_track(p: Pal) -> impl Fn(&Theme) -> container::Style {
     move |_| container::Style {
         background: Some(p.raised.into()),
-        border: border(Color::TRANSPARENT, 0.0, RADIUS_SM + 2.0),
+        border: border(Color::TRANSPARENT, 0.0, RADIUS_SM),
         ..Default::default()
     }
 }
@@ -410,18 +495,20 @@ pub fn seg_track(p: Pal) -> impl Fn(&Theme) -> container::Style {
 
 pub fn input(p: Pal) -> impl Fn(&Theme, text_input::Status) -> text_input::Style {
     move |_, s| {
-        let bd = match s {
-            text_input::Status::Focused => p.text,
-            text_input::Status::Hovered => p.line_strong,
-            _ => p.line,
+        // Champ épuré : fond plein discret, filet neutre au survol, violet au focus.
+        let (bd, bg) = match s {
+            text_input::Status::Focused => (p.accent, p.surface),
+            text_input::Status::Hovered => (p.line_strong, p.raised),
+            text_input::Status::Disabled => (Color::TRANSPARENT, alpha(p.raised, 0.5)),
+            _ => (Color::TRANSPARENT, p.raised),
         };
         text_input::Style {
-            background: Background::Color(p.surface),
-            border: border(bd, 1.0, RADIUS_SM + 2.0),
+            background: Background::Color(bg),
+            border: border(bd, 1.0, RADIUS_SM),
             icon: p.muted,
             placeholder: p.faint,
             value: p.text,
-            selection: alpha(p.text, 0.18),
+            selection: alpha(p.accent, 0.35),
         }
     }
 }
@@ -434,7 +521,7 @@ pub fn input_bare(p: Pal) -> impl Fn(&Theme, text_input::Status) -> text_input::
         icon: p.muted,
         placeholder: p.muted,
         value: p.text,
-        selection: alpha(p.text, 0.18),
+        selection: alpha(p.accent, 0.35),
     }
 }
 
@@ -449,7 +536,7 @@ pub fn toggle(p: Pal) -> impl Fn(&Theme, toggler::Status) -> toggler::Style {
             background: if on { p.accent } else { p.line_strong },
             background_border_width: 0.0,
             background_border_color: Color::TRANSPARENT,
-            foreground: if on { p.on_accent } else { p.surface },
+            foreground: hex(0xFFFFFF),
             foreground_border_width: 0.0,
             foreground_border_color: Color::TRANSPARENT,
         }

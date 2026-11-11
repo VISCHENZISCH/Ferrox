@@ -2,6 +2,17 @@
 
 use time::{OffsetDateTime, UtcOffset};
 
+/// Débit en octets par seconde : « 2.4 Mo/s ».
+pub fn rate(bps: f64) -> String {
+    format!("{}/s", bytes(bps.max(0.0).round() as u64))
+}
+
+/// Débit rond pour une borne d'échelle, sans décimale inutile : « 500 Ko/s », « 1 Mo/s ».
+pub fn rate_round(bps: f64) -> String {
+    let s = rate(bps);
+    s.replace(".0 ", " ")
+}
+
 pub fn bytes(b: u64) -> String {
     let f = b as f64;
     if b < 1024 {

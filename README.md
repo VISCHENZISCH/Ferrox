@@ -87,4 +87,4 @@ Service Linux : voir [packaging/ferroxd.service](packaging/ferroxd.service). His
 
 ## Licence
 
-MIT. Les polices Manrope et JetBrains Mono sont sous licence OFL. Les icônes et le logo ont été dessinés pour le projet.
+MIT. Les polices IBM Plex Sans et JetBrains Mono sont sous licence OFL. Les icônes et le logo ont été dessinés pour le projet.

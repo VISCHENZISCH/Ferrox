@@ -1,13 +1,15 @@
 //! Tableaux temps réel : trafic web et requêtes DNS.
 
-use super::widgets::{caps, cell, divider, empty_state, icon_btn, mono, seg, vscroll, El, GAP};
+use super::widgets::{
+    caps, cell, divider, empty_state, icon_btn, mono, search_box, seg, state_chip, vscroll, El, GAP,
+};
 use crate::app::{ActionFilter, App, Message};
 use crate::fmt;
 use crate::icons::{icon, Ico};
-use crate::theme::{self, Pal, MONO, UI_BOLD};
+use crate::theme::{self, size, Pal, UI_BOLD};
 use ferrox_core::event::{Action, Scheme};
-use iced::widget::{column, container, horizontal_space, row, text, text_input, tooltip, Space};
-use iced::{Alignment, Background, Color, Length, Padding, Theme};
+use iced::widget::{column, container, horizontal_space, row, text, tooltip, Space};
+use iced::{Alignment, Color, Length, Padding, Theme};
 
 const MAX_ROWS: usize = 250;
 
@@ -24,27 +26,7 @@ fn toolbar<'a>(
     (shown, total): (usize, usize),
     placeholder: &str,
 ) -> El<'a> {
-    let search = container(
-        row![
-            icon(Ico::Search, 17.0, p.muted),
-            text_input(placeholder, query)
-                .on_input(on_query)
-                .font(MONO)
-                .size(14)
-                .padding(Padding::from([9, 0]))
-                .style(move |t, s| {
-                    let mut st = theme::input(p)(t, s);
-                    st.border.width = 0.0;
-                    st.background = Background::Color(Color::TRANSPARENT);
-                    st
-                }),
-        ]
-        .spacing(8)
-        .align_y(Alignment::Center),
-    )
-    .padding(Padding::from([0, 14]))
-    .width(Length::Fixed(400.0))
-    .style(theme::card(p));
+    let search = search_box(p, placeholder, query, on_query, None, 400.0);
     row![
         search,
         seg(
@@ -68,7 +50,11 @@ fn toolbar<'a>(
             ]
         ),
         horizontal_space(),
-        mono(format!("{shown} affichées sur {total}"), 13, p.muted),
+        mono(
+            format!("{shown} affichées sur {total}"),
+            size::SMALL,
+            p.muted
+        ),
     ]
     .spacing(12)
     .align_y(Alignment::Center)
@@ -145,13 +131,14 @@ pub fn http_view(app: &App, p: Pal) -> El<'_> {
         cell(caps("Heure", p), w(76.0)),
         cell(caps("Client", p), w(124.0)),
         cell(caps("Méthode", p), w(72.0)),
+        cell(caps("État", p), w(96.0)),
         cell(caps("Hôte", p), Length::FillPortion(3)),
         cell(caps("Chemin / motif", p), Length::FillPortion(4)),
         cell(caps("Statut", p), w(52.0)),
         cell(caps("Envoyé", p), w(72.0)),
         cell(caps("Reçu", p), w(72.0)),
         cell(caps("Durée", p), w(62.0)),
-        Space::with_width(26),
+        Space::with_width(28),
     ]
     .spacing(10);
 
@@ -163,7 +150,8 @@ pub fn http_view(app: &App, p: Pal) -> El<'_> {
             let host_cell: El = {
                 let mut r = row![].spacing(6).align_y(Alignment::Center);
                 match e.scheme {
-                    Scheme::Https => r = r.push(icon(Ico::Lock, 14.0, p.text)),
+                    // Flux déchiffré par l'interception : repère cyan « inspecté ».
+                    Scheme::Https => r = r.push(icon(Ico::Lock, 14.0, p.inspect)),
                     Scheme::Tunnel => r = r.push(icon(Ico::Lock, 14.0, p.faint)),
                     Scheme::Http => {}
                 }
@@ -173,14 +161,14 @@ pub fn http_view(app: &App, p: Pal) -> El<'_> {
                 };
                 r = r.push(mono(
                     fmt::truncate(&format!("{}{port}", e.host), 34),
-                    13,
+                    size::SMALL,
                     p.text,
                 ));
                 let inner = cell(r, Length::Fill);
                 match &e.user_agent {
                     Some(ua) => tooltip(
                         inner,
-                        container(mono(fmt::truncate(ua, 160), 11, p.text))
+                        container(mono(fmt::truncate(ua, 160), size::BODY, p.text))
                             .padding(8)
                             .max_width(460)
                             .style(theme::raised(p)),
@@ -192,44 +180,68 @@ pub fn http_view(app: &App, p: Pal) -> El<'_> {
             };
             let detail: El = if blocked {
                 mono(
-                    fmt::truncate(&e.reason.clone().unwrap_or_default(), 48),
-                    13,
+                    fmt::truncate(&e.reason.clone().unwrap_or_default(), 28),
+                    size::SMALL,
                     p.danger,
                 )
                 .into()
             } else if let Some(r) = &e.reason {
-                mono(r, 13, p.muted).into()
+                mono(r, size::SMALL, p.muted).into()
             } else if e.scheme == Scheme::Tunnel {
-                text("tunnel chiffré").size(13).color(p.faint).into()
+                text("tunnel chiffré")
+                    .size(size::SMALL)
+                    .color(p.faint)
+                    .into()
             } else {
                 mono(
                     fmt::truncate(&e.path.clone().unwrap_or_default(), 56),
-                    13,
+                    size::SMALL,
                     p.muted,
                 )
                 .into()
             };
             container(
                 row![
-                    cell(mono(fmt::clock(e.ts), 13, p.muted), w(76.0)),
-                    cell(mono(e.client, 13, p.text), w(124.0)),
+                    cell(mono(fmt::clock(e.ts), size::SMALL, p.muted), w(76.0)),
+                    cell(mono(e.client, size::SMALL, p.text), w(124.0)),
                     cell(
-                        text(e.method.clone()).size(13).font(UI_BOLD).color(p.muted),
+                        text(e.method.clone())
+                            .size(size::SMALL)
+                            .font(UI_BOLD)
+                            .color(p.muted),
                         w(72.0)
+                    ),
+                    cell(
+                        if blocked {
+                            state_chip(p, "Bloqué", p.danger)
+                        } else {
+                            match e.scheme {
+                                Scheme::Https => state_chip(p, "Inspecté", p.inspect),
+                                Scheme::Tunnel => state_chip(p, "Tunnel", p.muted),
+                                Scheme::Http => state_chip(p, "Autorisé", p.ok),
+                            }
+                        },
+                        w(96.0)
                     ),
                     container(host_cell)
                         .width(Length::FillPortion(3))
                         .clip(true),
                     cell(detail, Length::FillPortion(4)),
                     cell(
-                        mono(e.status, 12, status_color(p, e.status, blocked)),
+                        mono(e.status, size::CAPTION, status_color(p, e.status, blocked)),
                         w(52.0)
                     ),
-                    cell(mono(fmt::bytes(e.bytes_up), 13, p.muted), w(72.0)),
-                    cell(mono(fmt::bytes(e.bytes_down), 13, p.muted), w(72.0)),
-                    cell(mono(fmt::duration_ms(e.duration_ms), 13, p.faint), w(62.0)),
+                    cell(mono(fmt::bytes(e.bytes_up), size::SMALL, p.muted), w(72.0)),
+                    cell(
+                        mono(fmt::bytes(e.bytes_down), size::SMALL, p.muted),
+                        w(72.0)
+                    ),
+                    cell(
+                        mono(fmt::duration_ms(e.duration_ms), size::SMALL, p.faint),
+                        w(62.0)
+                    ),
                     if blocked {
-                        El::from(Space::with_width(26))
+                        El::from(Space::new(28, 28))
                     } else {
                         icon_btn(p, Ico::Filter, p.muted, Message::QuickBlock(e.host.clone()))
                     },
@@ -299,7 +311,7 @@ pub fn dns_view(app: &App, p: Pal) -> El<'_> {
         cell(caps("Latence", p), w(66.0)),
         cell(caps("Source", p), w(68.0)),
         cell(caps("Motif", p), Length::FillPortion(3)),
-        Space::with_width(26),
+        Space::with_width(28),
     ]
     .spacing(10);
 
@@ -323,20 +335,26 @@ pub fn dns_view(app: &App, p: Pal) -> El<'_> {
             };
             container(
                 row![
-                    cell(mono(fmt::clock(e.ts), 13, p.muted), w(76.0)),
-                    cell(mono(e.client, 13, p.text), w(124.0)),
+                    cell(mono(fmt::clock(e.ts), size::SMALL, p.muted), w(76.0)),
+                    cell(mono(e.client, size::SMALL, p.text), w(124.0)),
                     cell(
-                        mono(fmt::truncate(&e.qname, 64), 13, p.text),
+                        mono(fmt::truncate(&e.qname, 64), size::SMALL, p.text),
                         Length::FillPortion(5)
                     ),
                     cell(
-                        text(e.qtype.clone()).size(13).font(UI_BOLD).color(p.muted),
+                        text(e.qtype.clone())
+                            .size(size::SMALL)
+                            .font(UI_BOLD)
+                            .color(p.muted),
                         w(56.0)
                     ),
-                    cell(mono(&e.rcode, 12, rc_color), w(92.0)),
-                    cell(mono(e.answers, 13, p.muted), w(40.0)),
-                    cell(mono(fmt::duration_ms(e.latency_ms), 13, p.faint), w(66.0)),
-                    cell(mono(src, 12, src_c), w(68.0)),
+                    cell(mono(&e.rcode, size::CAPTION, rc_color), w(92.0)),
+                    cell(mono(e.answers, size::SMALL, p.muted), w(40.0)),
+                    cell(
+                        mono(fmt::duration_ms(e.latency_ms), size::SMALL, p.faint),
+                        w(66.0)
+                    ),
+                    cell(mono(src, size::CAPTION, src_c), w(68.0)),
                     cell(
                         mono(
                             e.reason.clone().unwrap_or_default(),
@@ -346,7 +364,7 @@ pub fn dns_view(app: &App, p: Pal) -> El<'_> {
                         Length::FillPortion(3)
                     ),
                     if blocked {
-                        El::from(Space::with_width(26))
+                        El::from(Space::new(28, 28))
                     } else {
                         icon_btn(
                             p,

@@ -6,7 +6,7 @@ use super::widgets::{counter, empty_state, pill, section_title, vscroll, El, GAP
 use crate::app::{App, Message, Page};
 use crate::fmt;
 use crate::icons::{icon, Ico};
-use crate::theme::{self, Pal, UI_BOLD};
+use crate::theme::{self, size, Pal, UI_BOLD, UI_HEAVY, UI_STRONG};
 use ferrox_core::event::{Action, Severity};
 use iced::widget::{button, canvas, column, container, horizontal_space, row, text, Space};
 use iced::{Alignment, Color, Length, Padding};
@@ -21,25 +21,68 @@ pub fn category_color(p: Pal, cat: &str) -> Color {
     }
 }
 
-/// Chiffre clé du bandeau, avec libellé et lien.
-fn stat<'a>(p: Pal, value: String, label: &str, to: Page) -> El<'a> {
-    column![
-        text(value).size(34).font(UI_BOLD).color(p.text),
-        Space::with_height(Length::Fill),
-        row![
+/// Chiffre clé du bandeau : carte avec valeur, libellé et lien.
+/// `highlight` la passe en couleur principale (comme la carte mise en avant de la référence).
+fn stat<'a>(p: Pal, value: String, label: &str, to: Page, highlight: bool) -> El<'a> {
+    let (fg, sub) = if highlight {
+        (p.on_accent, theme::mix(p.on_accent, p.accent, 0.9))
+    } else {
+        (p.text, p.muted)
+    };
+    // « 409.5 Ko » : chiffre en grand, unité plus petite, sur une seule ligne.
+    let (num, unit) = match value.rsplit_once(' ') {
+        Some((n, u)) => (n.to_string(), Some(u.to_string())),
+        None => (value, None),
+    };
+    let mut figure = row![text(num)
+        .size(size::DISPLAY)
+        .font(UI_STRONG)
+        .color(fg)
+        .wrapping(iced::widget::text::Wrapping::None)]
+    .spacing(4)
+    .align_y(Alignment::End);
+    if let Some(u) = unit {
+        figure = figure.push(
+            container(
+                text(u)
+                    .size(size::HEADING)
+                    .font(UI_HEAVY)
+                    .color(sub)
+                    .wrapping(iced::widget::text::Wrapping::None),
+            )
+            .padding(Padding::ZERO.bottom(4)),
+        );
+    }
+    container(
+        column![
             text(label.to_string())
-                .size(13)
-                .color(p.text)
-                .width(Length::Fill),
-            button(icon(Ico::Arrow, 20.0, p.text))
-                .padding(6)
-                .on_press(Message::Nav(to))
-                .style(theme::btn_text(p)),
+                .size(size::SMALL)
+                .font(UI_BOLD)
+                .color(sub)
+                .wrapping(iced::widget::text::Wrapping::None),
+            Space::with_height(Length::Fill),
+            row![
+                figure,
+                horizontal_space(),
+                button(icon(Ico::Arrow, 18.0, fg))
+                    .padding(6)
+                    .on_press(Message::Nav(to))
+                    .style(theme::btn_text(p)),
+            ]
+            .align_y(Alignment::End),
         ]
-        .align_y(Alignment::End),
-    ]
+        .height(Length::Fill),
+    )
+    .padding(Padding::from([20, 22]))
     .height(Length::Fill)
     .width(Length::FillPortion(2))
+    .style(move |t| {
+        if highlight {
+            theme::card_inverted(p)(t)
+        } else {
+            theme::card(p)(t)
+        }
+    })
     .into()
 }
 
@@ -58,24 +101,16 @@ pub fn hero(app: &App, p: Pal) -> El<'_> {
         let ago = (12 - i) * 10;
         labels.push(match i {
             0 | 4 | 8 => format!("-{ago} s"),
-            11 => "maint.".into(),
+            11 => "0 s".into(),
             _ => String::new(),
         });
     }
 
-    let total = t.requests + t.dns_queries;
-    let blocked = t.blocked + t.dns_blocked;
-    let ratio = if total > 0 {
-        1.0 - blocked as f32 / total as f32
-    } else {
-        1.0
-    };
-
     let chart = column![
         row![
             text("Activité, par tranche de 10 s")
-                .size(15)
-                .font(UI_BOLD)
+                .size(size::HEADING)
+                .font(UI_HEAVY)
                 .color(p.text),
             horizontal_space(),
             legend(p, true, "Web"),
@@ -95,18 +130,26 @@ pub fn hero(app: &App, p: Pal) -> El<'_> {
     .spacing(12)
     .width(Length::FillPortion(5));
 
+    // Débit en temps réel, échelle adaptée au pic de la dernière minute.
+    let scale = app.rate.scale();
     let gauge = container(
         canvas(Gauge {
-            ratio,
-            value: format!("{:.0} %", ratio * 100.0),
-            caption: "de trafic autorisé".into(),
+            ratio: (app.rate.total() / scale) as f32,
+            value: fmt::rate(app.rate.total()),
+            caption: format!(
+                "\u{2191} {}   \u{2193} {}",
+                fmt::rate(app.rate.up),
+                fmt::rate(app.rate.down)
+            ),
+            min_label: "0".into(),
+            max_label: fmt::rate_round(scale),
             pal: p,
         })
-        .width(Length::Fixed(250.0))
-        .height(Length::Fixed(150.0)),
+        .width(Length::Fixed(270.0))
+        .height(Length::Fixed(196.0)),
     )
-    .width(Length::FillPortion(4))
-    .center_x(Length::FillPortion(4))
+    .width(Length::FillPortion(3))
+    .center_x(Length::FillPortion(3))
     .center_y(Length::Fill);
 
     let unseen = s
@@ -120,18 +163,19 @@ pub fn hero(app: &App, p: Pal) -> El<'_> {
         stat(
             p,
             fmt::count(unseen as u64),
-            "Alertes\nnon lues",
-            Page::Alerts
+            "Alertes non lues",
+            Page::Alerts,
+            true,
         ),
-        Space::with_width(24),
         stat(
             p,
-            fmt::bytes(t.bytes_up + t.bytes_down),
-            "Volume\néchangé",
-            Page::Traffic
+            fmt::bytes(t.live_bytes_up + t.live_bytes_down),
+            "Volume échangé",
+            Page::Traffic,
+            false,
         ),
     ]
-    .spacing(28)
+    .spacing(20)
     .height(Length::Fixed(200.0))
     .into()
 }
@@ -139,7 +183,7 @@ pub fn hero(app: &App, p: Pal) -> El<'_> {
 fn legend<'a>(p: Pal, solid: bool, label: &str) -> El<'a> {
     let sw: El = if solid {
         container(Space::new(10, 10))
-            .style(theme::fill_round(p.text, 2.0))
+            .style(theme::fill_round(p.series, 3.0))
             .into()
     } else {
         container(Space::new(10, 10))
@@ -153,7 +197,7 @@ fn legend<'a>(p: Pal, solid: bool, label: &str) -> El<'a> {
             })
             .into()
     };
-    row![sw, text(label.to_string()).size(13).color(p.muted)]
+    row![sw, text(label.to_string()).size(size::SMALL).color(p.muted)]
         .spacing(6)
         .align_y(Alignment::Center)
         .into()
@@ -176,21 +220,23 @@ pub fn kcard<'a>(p: Pal, c: CardSpec<'a>) -> El<'a> {
     let (fg, sub, border) = if c.inverted {
         (
             p.on_accent,
-            theme::alpha(p.on_accent, 0.7),
-            theme::alpha(p.on_accent, 0.3),
+            theme::mix(p.on_accent, p.accent, 0.9),
+            theme::mix(p.on_accent, p.accent, 0.5),
         )
     } else {
         (p.text, p.muted, p.line_strong)
     };
     let mut head = row![].spacing(8).align_y(Alignment::Center);
     if let Some(col) = c.accent {
-        head = head.push(container(Space::new(7, 7)).style(theme::fill_round(col, 3.5)));
+        // Sur la carte jaune, le point prend la couleur du texte pour rester visible.
+        let col = if c.inverted { p.on_accent } else { col };
+        head = head.push(container(Space::new(8, 8)).style(theme::fill_round(col, 4.0)));
     }
     head = head
         .push(
             text(c.title)
-                .size(16)
-                .font(UI_BOLD)
+                .size(size::HEADING)
+                .font(UI_HEAVY)
                 .color(fg)
                 .wrapping(iced::widget::text::Wrapping::None)
                 .width(Length::Fill),
@@ -207,25 +253,25 @@ pub fn kcard<'a>(p: Pal, c: CardSpec<'a>) -> El<'a> {
     let mut meta = row![].spacing(12).align_y(Alignment::Center);
     for (ico, v) in c.meta {
         meta = meta.push(
-            row![icon(ico, 14.0, fg), text(v).size(12).color(fg)]
+            row![icon(ico, 14.0, fg), text(v).size(size::CAPTION).color(fg)]
                 .spacing(5)
                 .align_y(Alignment::Center),
         );
     }
-    let mut body = column![head, text(c.desc).size(13).color(sub)].spacing(8);
+    let mut body = column![head, text(c.desc).size(size::SMALL).color(sub)].spacing(8);
     if let Some(x) = c.extra {
         body = body.push(x);
     }
     body = body.push(Space::with_height(4)).push(
         row![
-            pill(Ico::Clock, c.time, fg, border),
+            pill(Ico::Clock, c.time, sub, border),
             horizontal_space(),
             meta
         ]
         .align_y(Alignment::Center),
     );
     container(body)
-        .padding(Padding::from([16, 20]))
+        .padding(Padding::from([18, 20]))
         .width(Length::Fill)
         .style(move |t| {
             if c.inverted {
@@ -250,7 +296,7 @@ pub fn kcolumn<'a>(p: Pal, title: &str, count: usize, cards: Vec<El<'a>>, empty:
     .spacing(12)
     .width(Length::FillPortion(1));
     if cards.is_empty() {
-        col = col.push(container(empty).style(theme::card_soft(p)));
+        col = col.push(container(empty).style(theme::card(p)));
     }
     for c in cards {
         col = col.push(c);
@@ -397,7 +443,7 @@ pub fn view(app: &App, p: Pal) -> El<'_> {
                     action: None,
                     inverted: Some(a.id) == newest_unseen,
                     soft: a.id <= app.alerts_cleared_at,
-                    accent: (a.severity >= Severity::High).then_some(p.danger),
+                    accent: (a.severity >= Severity::Medium).then(|| p.severity(a.severity)),
                     extra: None,
                 },
             )

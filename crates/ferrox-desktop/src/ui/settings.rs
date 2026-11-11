@@ -3,7 +3,7 @@
 use super::widgets::{btn, card, field, hint, mono_wrap, secret_field, seg, toggle_row, El, Kind};
 use crate::app::{App, Field, Message, Toggle};
 use crate::icons::Ico;
-use crate::theme::{self, Pal};
+use crate::theme::{self, size, Pal};
 use ferrox_core::config::DnsBlockMode;
 use iced::widget::{column, container, horizontal_space, row, text};
 use iced::{Alignment, Length, Padding};
@@ -11,7 +11,7 @@ use iced::{Alignment, Length, Padding};
 fn code<'a>(p: Pal, s: &str) -> El<'a> {
     container(
         iced::widget::text(s.to_string())
-            .size(12)
+            .size(size::CAPTION)
             .font(crate::theme::CODE)
             .color(p.text),
     )
@@ -73,7 +73,7 @@ pub fn view(app: &App, p: Pal) -> El<'_> {
             ]
             .spacing(12),
             row![
-                text("Réponse aux domaines bloqués").size(13).color(p.muted),
+                text("Réponse aux domaines bloqués").size(size::SMALL).color(p.muted),
                 horizontal_space(),
                 seg(
                     p,
@@ -132,7 +132,7 @@ pub fn view(app: &App, p: Pal) -> El<'_> {
                 |v| Message::Flag(Toggle::Mitm, v)
             ),
             column![
-                text("Certificat CA à installer").size(12).color(p.muted),
+                text("Certificat CA à installer").size(size::CAPTION).color(p.muted),
                 mono_wrap(ca_path.clone().unwrap_or_else(|| "non généré".into()), 12, if ca_path.is_some() { p.text } else { p.faint }),
             ]
             .spacing(4),
@@ -150,7 +150,7 @@ pub fn view(app: &App, p: Pal) -> El<'_> {
         Some(Ico::Alert),
         None,
         column![
-            text("Balises C2").size(13).color(p.text),
+            text("Balises C2").size(size::SMALL).color(p.text),
             row![
                 field(p, "Gigue maximale (%)", &fm.beacon_cv, "15", |v| {
                     Message::Form(Field::BeaconCv, v)
@@ -160,7 +160,7 @@ pub fn view(app: &App, p: Pal) -> El<'_> {
                 }),
             ]
             .spacing(12),
-            text("Exfiltration").size(13).color(p.text),
+            text("Exfiltration").size(size::SMALL).color(p.text),
             row![
                 field(p, "Envoi unique (Mo)", &fm.single_mb, "20", |v| {
                     Message::Form(Field::SingleMb, v)
@@ -170,7 +170,7 @@ pub fn view(app: &App, p: Pal) -> El<'_> {
                 }),
             ]
             .spacing(12),
-            text("DNS et User-Agent").size(13).color(p.text),
+            text("DNS et User-Agent").size(size::SMALL).color(p.text),
             row![
                 field(p, "Entropie DGA (bits/car.)", &fm.entropy, "3.5", |v| {
                     Message::Form(Field::Entropy, v)
@@ -249,10 +249,10 @@ pub fn view(app: &App, p: Pal) -> El<'_> {
             Some(Message::OpenFolder(app.paths.data_dir.clone())),
         )),
         column![
-            text("Configuration").size(12).color(p.muted),
+            text("Configuration").size(size::CAPTION).color(p.muted),
             mono_wrap(app.paths.config_file.display().to_string(), 12, p.text),
             text("Données (CA, listes, journaux)")
-                .size(12)
+                .size(size::CAPTION)
                 .color(p.muted),
             mono_wrap(app.paths.data_dir.display().to_string(), 12, p.text),
         ]
@@ -263,7 +263,7 @@ pub fn view(app: &App, p: Pal) -> El<'_> {
     let footer = container(
         row![
             text("Les changements de ports et d'interception redémarrent le moteur.")
-                .size(13)
+                .size(size::SMALL)
                 .color(p.muted),
             horizontal_space(),
             btn(

@@ -1,6 +1,6 @@
 //! Graphiques sur canvas : barres groupées (pleines / hachurées) et jauge à graduations.
 
-use crate::theme::{alpha, Pal, UI, UI_BOLD, UI_HEAVY};
+use crate::theme::{alpha, size, Pal, UI, UI_BOLD, UI_STRONG};
 use iced::alignment::{Horizontal, Vertical};
 use iced::mouse;
 use iced::widget::canvas::{self, Frame, Geometry, Path, Stroke, Text};
@@ -10,6 +10,8 @@ fn nice_max(v: f32) -> f32 {
     if v <= 0.0 {
         return 10.0;
     }
+    // Au moins 4 : les graduations 0 / moitié / max restent des entiers distincts.
+    let v = v.max(4.0);
     let mag = 10f32.powf(v.log10().floor());
     let n = v / mag;
     let step = if n <= 1.0 {
@@ -106,7 +108,7 @@ impl<M> canvas::Program<M> for Bars {
             f.fill_text(label(
                 txt,
                 Point::new(0.0, y(v)),
-                11.0,
+                size::MICRO,
                 p.muted,
                 Horizontal::Left,
                 Vertical::Center,
@@ -128,7 +130,8 @@ impl<M> canvas::Program<M> for Bars {
                 self.hatched.get(i).copied().unwrap_or(0.0),
             );
             let dim = hover.is_some_and(|k| k != i);
-            let ink = if dim { alpha(p.text, 0.35) } else { p.text };
+            let ink = if dim { alpha(p.muted, 0.45) } else { p.muted };
+            let fill = if dim { alpha(p.series, 0.4) } else { p.series };
             // Barre hachurée.
             let hx = cx - gap / 2.0 - bw;
             let hy = y(hv);
@@ -150,16 +153,16 @@ impl<M> canvas::Program<M> for Bars {
                     &Path::rounded_rectangle(
                         Point::new(sx, sy),
                         Size::new(bw, top + h - sy),
-                        2.0.into(),
+                        3.0.into(),
                     ),
-                    ink,
+                    fill,
                 );
             }
             if let Some(l) = self.labels.get(i).filter(|l| !l.is_empty()) {
                 f.fill_text(label(
                     l.clone(),
                     Point::new(cx, top + h + 9.0),
-                    11.0,
+                    size::MICRO,
                     p.muted,
                     Horizontal::Center,
                     Vertical::Top,
@@ -182,15 +185,15 @@ impl<M> canvas::Program<M> for Bars {
             let (tw, th) = (150.0, 46.0);
             let tx = (cx - tw / 2.0).clamp(left, bounds.width - tw);
             let tip = Path::rounded_rectangle(Point::new(tx, top), Size::new(tw, th), 8.0.into());
-            f.fill(&tip, p.accent);
+            f.fill(&tip, p.ink);
             for (k, l) in lines.into_iter().enumerate() {
                 f.fill_text(Text {
                     font: UI_BOLD,
                     ..label(
                         l,
                         Point::new(tx + 12.0, top + 9.0 + 15.0 * k as f32),
-                        12.0,
-                        p.on_accent,
+                        f32::from(size::CAPTION),
+                        p.on_ink,
                         Horizontal::Left,
                         Vertical::Top,
                     )
@@ -201,11 +204,14 @@ impl<M> canvas::Program<M> for Bars {
     }
 }
 
-/// Jauge en arc composée de graduations, valeur au centre.
+/// Jauge en arc composée de graduations : valeur au centre, légende dessous,
+/// bornes de l'échelle aux deux extrémités de l'arc.
 pub struct Gauge {
     pub ratio: f32,
     pub value: String,
     pub caption: String,
+    pub min_label: String,
+    pub max_label: String,
     pub pal: Pal,
 }
 
@@ -223,7 +229,8 @@ impl<M> canvas::Program<M> for Gauge {
         let p = self.pal;
         let mut f = Frame::new(renderer, bounds.size());
         let cx = bounds.width / 2.0;
-        let r = (bounds.width / 2.0 - 4.0).min(bounds.height * 0.78);
+        // Place réservée sous l'arc pour les bornes de l'échelle.
+        let r = (bounds.width / 2.0 - 4.0).min((bounds.height - 30.0) * 0.72);
         let cy = r + 6.0;
         let ticks = 46;
         let (start, span) = (200f32.to_radians(), 220f32.to_radians());
@@ -237,17 +244,22 @@ impl<M> canvas::Program<M> for Gauge {
             f.stroke(
                 &Path::line(p0, p1),
                 Stroke::default()
-                    .with_color(if i < active { p.text } else { p.line_strong })
-                    .with_width(1.6)
+                    .with_color(if i < active { p.series } else { p.line_strong })
+                    .with_width(if i % 5 == 0 { 2.2 } else { 1.6 })
                     .with_line_cap(canvas::LineCap::Round),
             );
         }
         f.fill_text(Text {
-            font: UI_HEAVY,
+            font: UI_STRONG,
             ..label(
                 self.value.clone(),
                 Point::new(cx, cy - 4.0),
-                32.0,
+                // Taille réduite si le texte est long (« 578.0 Ko/s ») pour rester dans l'arc.
+                if self.value.chars().count() > 7 {
+                    f32::from(size::TITLE) + 2.0
+                } else {
+                    f32::from(size::DISPLAY)
+                },
                 p.text,
                 Horizontal::Center,
                 Vertical::Bottom,
@@ -256,11 +268,28 @@ impl<M> canvas::Program<M> for Gauge {
         f.fill_text(label(
             self.caption.clone(),
             Point::new(cx, cy + 6.0),
-            13.0,
+            f32::from(size::SMALL),
             p.muted,
             Horizontal::Center,
             Vertical::Top,
         ));
+        // Bornes sous les extrémités de l'arc (200° et -20°).
+        let end = 20f32.to_radians();
+        let (ex, ey) = (r * end.cos(), cy + r * end.sin() + 8.0);
+        // Bornes alignées sur l'extérieur de l'arc : jamais coupées par le bord.
+        for (txt, x, h) in [
+            (&self.min_label, cx - ex - 6.0, Horizontal::Left),
+            (&self.max_label, cx + ex + 6.0, Horizontal::Right),
+        ] {
+            f.fill_text(label(
+                txt.clone(),
+                Point::new(x, ey),
+                size::MICRO,
+                p.faint,
+                h,
+                Vertical::Top,
+            ));
+        }
         vec![f.into_geometry()]
     }
 }
