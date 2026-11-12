@@ -4,6 +4,8 @@
 //! Le détecteur tourne sur le fil du pipeline : pas de verrou, état en mémoire borné
 //! et purgé périodiquement.
 
+pub mod rules;
+
 use crate::config::DetectConfig;
 use crate::event::{Action, Alert, AlertKind, DnsEvent, Event, HttpEvent, Scheme, Severity};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -50,28 +52,15 @@ pub struct Detector {
     nx_win: HashMap<IpAddr, NxWindow>,
     cooldown: HashMap<(AlertKind, IpAddr, Box<str>), i64>,
     last_prune: i64,
+    rules: std::sync::Arc<rules::RuleSet>,
+    rule_state: rules::RuleState,
 }
 
-/// Domaine « enregistrable » approximatif (sans liste des suffixes publics).
+/// Domaine enregistrable selon la liste des suffixes publics (publicsuffix.org) :
+/// `a.b.example.co.uk` → `example.co.uk`, `x.user.github.io` → `user.github.io`.
+/// Un nom qui est lui-même un suffixe public (ou invalide) est renvoyé tel quel.
 pub fn registrable(host: &str) -> &str {
-    let labels: Vec<&str> = host.split('.').collect();
-    let n = labels.len();
-    if n <= 2 {
-        return host;
-    }
-    let tld = labels[n - 1];
-    let sld = labels[n - 2];
-    let take = if tld.len() == 2
-        && matches!(
-            sld,
-            "co" | "com" | "net" | "org" | "gov" | "ac" | "edu" | "gouv" | "ne" | "or"
-        ) {
-        3
-    } else {
-        2
-    };
-    let skip: usize = labels[..n - take].iter().map(|l| l.len() + 1).sum();
-    &host[skip..]
+    psl::domain_str(host).unwrap_or(host)
 }
 
 /// Entropie de Shannon en bits par caractère.
@@ -125,6 +114,8 @@ struct AlertSpec<'a> {
     user_agent: Option<&'a str>,
     detail: String,
     score: f32,
+    /// Règle TOML à l'origine de l'alerte : (identifiant, nom).
+    rule: Option<(&'a str, &'a str)>,
 }
 
 impl Detector {
@@ -143,13 +134,18 @@ impl Detector {
             user_agent,
             detail,
             score,
+            rule,
         } = a;
-        // Le User-Agent fait partie de la clé : deux outils différents vers un même hôte
-        // donnent deux alertes.
-        let key_target = match user_agent {
+        // Le User-Agent et la règle font partie de la clé : deux outils (ou deux règles)
+        // différents vers un même hôte donnent deux alertes.
+        let mut key_target = match user_agent {
             Some(ua) => format!("{target}\u{0}{ua}"),
             None => target.to_string(),
         };
+        if let Some((id, _)) = rule {
+            key_target.push('\u{1}');
+            key_target.push_str(id);
+        }
         let key = (kind, client, Box::<str>::from(key_target));
         if let Some(&last) = self.cooldown.get(&key) {
             if ts - last < cooldown_ms {
@@ -168,6 +164,8 @@ impl Detector {
             user_agent: user_agent.map(str::to_string),
             detail,
             score,
+            rule: rule.map(|r| r.0.to_string()),
+            rule_name: rule.map(|r| r.1.to_string()),
         });
     }
 
@@ -177,7 +175,42 @@ impl Detector {
             Event::Http(e) => self.http(cfg, e, &mut out),
             Event::Dns(e) => self.dns(cfg, e, &mut out),
         }
+        if !self.rules.rules.is_empty() {
+            let set = self.rules.clone();
+            for h in self.rule_state.eval(&set, ev) {
+                let r = &set.rules[h.rule_idx];
+                let score = match r.severity {
+                    Severity::Low => 0.3,
+                    Severity::Medium => 0.5,
+                    Severity::High => 0.75,
+                    Severity::Critical => 0.95,
+                };
+                self.alert(
+                    &mut out,
+                    AlertSpec {
+                        ts: h.ts,
+                        cooldown_ms: i64::try_from(r.def.cooldown_s.saturating_mul(1000))
+                            .unwrap_or(i64::MAX),
+                        kind: AlertKind::Rule,
+                        severity: r.severity,
+                        client: h.client,
+                        target: &h.target,
+                        user_agent: h.user_agent.as_deref(),
+                        detail: h.detail.clone(),
+                        score,
+                        rule: Some((&r.def.id, &r.def.name)),
+                    },
+                );
+            }
+        }
         out
+    }
+
+    /// Remplace les règles TOML (rechargement à chaud) ; les fenêtres de seuil repartent
+    /// de zéro.
+    pub fn set_rules(&mut self, rules: std::sync::Arc<rules::RuleSet>) {
+        self.rules = rules;
+        self.rule_state.reset();
     }
 
     fn threat(
@@ -212,6 +245,7 @@ impl Detector {
                     reason.as_deref().unwrap_or("liste")
                 ),
                 score: 0.9,
+                rule: None,
             },
         );
     }
@@ -305,6 +339,7 @@ impl Detector {
                 human_bytes(sm)
             ),
                 score,
+rule: None,
             },
         );
     }
@@ -325,6 +360,7 @@ impl Detector {
                     user_agent: None,
                     detail: format!("Envoi unique de {} vers {}", human_bytes(up), e.host),
                     score: (up / (xc.single_upload_mb * MB) / 4.0).min(1.0) as f32,
+                    rule: None,
                 },
             );
         }
@@ -360,6 +396,7 @@ impl Detector {
                         xc.window_s
                     ),
                     score: 0.8,
+                    rule: None,
                 },
             );
         }
@@ -397,6 +434,7 @@ impl Detector {
                         pu / pd.max(1.0)
                     ),
                     score: 0.6,
+                    rule: None,
                 },
             );
         }
@@ -424,6 +462,7 @@ impl Detector {
                             user_agent: None,
                             detail: "Requête sans User-Agent".into(),
                             score: 0.3,
+                            rule: None,
                         },
                     );
                 }
@@ -458,6 +497,7 @@ impl Detector {
                                 e.host
                             ),
                             score: 0.5,
+                            rule: None,
                         },
                     );
                 }
@@ -480,6 +520,7 @@ impl Detector {
                                 "{n} User-Agents différents en 10 minutes (rotation ou usurpation)"
                             ),
                             score: 0.5,
+                            rule: None,
                         },
                     );
                 }
@@ -521,6 +562,7 @@ impl Detector {
                         truncate(&e.qname, 80)
                     ),
                     score: 0.8,
+                    rule: None,
                 },
             );
         }
@@ -545,6 +587,7 @@ impl Detector {
                         user_agent: None,
                         detail: format!("Nom d'apparence aléatoire (entropie {h:.2} bits/car.)"),
                         score: (h / 4.5).min(1.0) as f32,
+                        rule: None,
                     },
                 );
             }
@@ -581,6 +624,7 @@ impl Detector {
                     user_agent: None,
                     detail: format!("{txt} requêtes TXT/CNAME/MX en une minute"),
                     score: 0.8,
+                    rule: None,
                 },
             );
         }
@@ -597,6 +641,7 @@ impl Detector {
                     user_agent: None,
                     detail: format!("{subs} sous-domaines uniques en une minute"),
                     score: 0.85,
+                    rule: None,
                 },
             );
         }
@@ -627,6 +672,7 @@ impl Detector {
                     user_agent: None,
                     detail: format!("{n} réponses NXDOMAIN sur {t} requêtes en une minute"),
                     score: 0.8,
+                    rule: None,
                 },
             );
         }
@@ -651,7 +697,18 @@ impl Detector {
         });
         self.dns_win.retain(|_, w| now - w.start < 120_000);
         self.nx_win.retain(|_, w| now - w.start < 120_000);
-        self.cooldown.retain(|_, t| now - *t < 3_600_000);
+        self.cooldown.retain(|_, t| now - *t < 86_400_000);
+        let max_win = self
+            .rules
+            .rules
+            .iter()
+            .filter_map(|r| r.def.threshold.map(|t| t.window_s))
+            .max()
+            .unwrap_or(0);
+        self.rule_state.prune(
+            now,
+            i64::try_from(max_win.saturating_mul(1000)).unwrap_or(i64::MAX),
+        );
     }
 }
 
@@ -710,6 +767,11 @@ mod tests {
         assert_eq!(registrable("a.b.example.com"), "example.com");
         assert_eq!(registrable("x.bbc.co.uk"), "bbc.co.uk");
         assert_eq!(registrable("example.com"), "example.com");
+        // Suffixes publics « privés » : chaque site est un domaine distinct (C-15).
+        assert_eq!(registrable("a.b.alice.github.io"), "alice.github.io");
+        assert_eq!(registrable("d111.cloudfront.net"), "d111.cloudfront.net");
+        assert_eq!(registrable("x.y.gouv.fr"), "y.gouv.fr");
+        assert_eq!(registrable("localhost"), "localhost");
     }
 
     #[test]

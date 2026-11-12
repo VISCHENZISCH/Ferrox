@@ -5,6 +5,7 @@
 //! ou au résolveur comme le ferait un client réel.
 
 use ferrox_core::config::{Config, ProxyAuth};
+use ferrox_core::dns::upstream::UpstreamKind;
 use ferrox_core::{Engine, Paths};
 use hickory_proto::op::{Message, MessageType, OpCode, Query, ResponseCode};
 use hickory_proto::rr::rdata::A;
@@ -398,11 +399,11 @@ fn dns_ignores_clients_outside_allow_list() {
 fn ipv6_upstream_without_port_is_accepted() {
     assert_eq!(
         ferrox_core::engine::parse_upstream("2606:4700::1111").unwrap(),
-        "[2606:4700::1111]:53".parse().unwrap()
+        UpstreamKind::Plain("[2606:4700::1111]:53".parse().unwrap())
     );
     assert_eq!(
         ferrox_core::engine::parse_upstream("1.1.1.1").unwrap(),
-        "1.1.1.1:53".parse().unwrap()
+        UpstreamKind::Plain("1.1.1.1:53".parse().unwrap())
     );
     assert!(ferrox_core::engine::parse_upstream("pas-une-ip").is_err());
 
@@ -415,4 +416,234 @@ fn ipv6_upstream_without_port_is_accepted() {
         data_dir: dir,
     };
     assert!(Engine::start(&cfg, &paths).is_err());
+}
+
+// ---------------------------------------------------------------- 0.3 à 1.0
+
+/// Attend qu'une condition devienne vraie (le pipeline écrit chaque seconde).
+fn wait_for(mut f: impl FnMut() -> bool) -> bool {
+    for _ in 0..40 {
+        if f() {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    false
+}
+
+#[test]
+fn pac_file_served_without_auth() {
+    let mut cfg = base_config();
+    cfg.proxy.auth = Some(ProxyAuth {
+        user: "alice".into(),
+        password: "x".into(),
+    });
+    let (engine, _d) = start(&cfg);
+    let proxy = addr_of(&engine, "Proxy");
+    let mut s = connect(proxy);
+    write!(
+        s,
+        "GET /proxy.pac HTTP/1.1\r\nHost: 192.168.1.5:3128\r\nConnection: close\r\n\r\n"
+    )
+    .unwrap();
+    let r = read_response(&mut s);
+    assert_eq!(status(&r), 200, "{r}");
+    assert!(r.contains("application/x-ns-proxy-autoconfig"));
+    assert!(r.contains("PROXY 192.168.1.5:3128"), "{r}");
+}
+
+#[test]
+fn logs_are_ecs_json_and_queries_masked() {
+    let upstream = http_server();
+    let mut cfg = base_config();
+    cfg.log.jsonl = true;
+    cfg.log.mask_query = true;
+    let (engine, dir) = start(&cfg);
+    let proxy = addr_of(&engine, "Proxy");
+    let r = get(proxy, &format!("http://{upstream}/p?token=secret&x=1"), "");
+    assert_eq!(status(&r), 200);
+    let logs = dir.join("logs");
+    let read_all = || -> String {
+        std::fs::read_dir(&logs)
+            .map(|d| {
+                d.flatten()
+                    .filter(|e| e.file_name().to_string_lossy().starts_with("traffic-"))
+                    .map(|e| std::fs::read_to_string(e.path()).unwrap_or_default())
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    assert!(
+        wait_for(|| read_all().contains("token=*")),
+        "{}",
+        read_all()
+    );
+    let text = read_all();
+    assert!(!text.contains("secret"));
+    // ENF-11 : chaque ligne est un document JSON avec @timestamp et la version ECS.
+    for line in text.lines() {
+        let v: serde_json::Value = serde_json::from_str(line).expect("JSON valide");
+        assert!(v["@timestamp"].is_string());
+        assert_eq!(v["ecs"]["version"], ferrox_core::logger::ECS_VERSION);
+    }
+}
+
+#[test]
+fn history_records_minutes() {
+    let upstream = http_server();
+    let cfg = base_config();
+    let (engine, _d) = start(&cfg);
+    let proxy = addr_of(&engine, "Proxy");
+    for _ in 0..3 {
+        assert_eq!(status(&get(proxy, &format!("http://{upstream}/"), "")), 200);
+    }
+    let path = engine
+        .history_path()
+        .expect("historique actif")
+        .to_path_buf();
+    let now = ferrox_core::event::now_ms();
+    assert!(wait_for(|| {
+        ferrox_core::history::HistoryReader::open(&path)
+            .and_then(|r| r.totals(now - 120_000, now + 120_000))
+            .is_ok_and(|t| t.totals.requests >= 3)
+    }));
+}
+
+#[test]
+fn rules_reload_without_restart() {
+    let cfg = base_config();
+    let (engine, dir) = start(&cfg);
+    let proxy = addr_of(&engine, "Proxy");
+    // Fichier d'exemple créé au premier démarrage.
+    let rules = dir.join("rules.toml");
+    assert!(rules.exists());
+    assert!(engine.info().rules_loaded >= 3);
+
+    std::fs::write(
+        &rules,
+        "[[rule]]\nid = \"lab\"\nname = \"Hôte de laboratoire\"\nseverity = \"critical\"\n\
+         [rule.match]\nhost = [\"lab.invalid\"]\n",
+    )
+    .unwrap();
+    engine.reload_rules();
+    assert!(wait_for(|| engine.info().rules_loaded == 1));
+
+    let _ = get(proxy, "http://www.lab.invalid/", "");
+    let stats = engine.stats();
+    assert!(wait_for(|| stats.alerts_since(0).iter().any(|a| a
+        .rule
+        .as_deref()
+        == Some("lab")
+        && a.severity == ferrox_core::event::Severity::Critical)));
+
+    // Fichier invalide : les règles précédentes restent, l'erreur est signalée.
+    std::fs::write(&rules, "[[rule]]\nid = 3").unwrap();
+    engine.reload_rules();
+    assert!(wait_for(|| engine.info().rules_error.is_some()));
+    assert_eq!(engine.info().rules_loaded, 1);
+}
+
+fn http_get_raw(addr: SocketAddr, path: &str, extra: &str) -> String {
+    let mut s = connect(addr);
+    write!(
+        s,
+        "GET {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n{extra}\r\n"
+    )
+    .unwrap();
+    read_response(&mut s)
+}
+
+#[test]
+fn api_and_metrics_with_token() {
+    let upstream = http_server();
+    let mut cfg = base_config();
+    cfg.api.enabled = true;
+    cfg.api.listen = "127.0.0.1:0".into();
+    cfg.api.token = Some("t0k".into());
+    let (engine, _d) = start(&cfg);
+    let proxy = addr_of(&engine, "Proxy");
+    let api = addr_of(&engine, "API");
+    assert_eq!(status(&get(proxy, &format!("http://{upstream}/"), "")), 200);
+
+    assert_eq!(status(&http_get_raw(api, "/metrics", "")), 401);
+    let auth = "Authorization: Bearer t0k\r\n";
+    assert!(wait_for(
+        || http_get_raw(api, "/metrics", auth).contains("ferrox_http_requests_total 1")
+    ));
+    let r = http_get_raw(api, "/api/v1/health", auth);
+    assert_eq!(status(&r), 200);
+    assert!(r.contains("\"status\":\"ok\""));
+    let r = http_get_raw(api, "/api/v1/status", auth);
+    assert!(r.contains("\"listeners\""), "{r}");
+    let r = http_get_raw(api, "/api/v1/history/series?hours=1&step=10", auth);
+    assert_eq!(status(&r), 200, "{r}");
+    assert_eq!(status(&http_get_raw(api, "/nope", auth)), 404);
+}
+
+#[test]
+fn intercepted_clients_can_speak_http2() {
+    let mut cfg = base_config();
+    cfg.tls.mitm = true;
+    let (engine, _d) = start(&cfg);
+    let proxy = addr_of(&engine, "Proxy");
+    let ca_pem = std::fs::read(engine.ca_cert_path().unwrap()).unwrap();
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    rt.block_on(async move {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let mut s = tokio::net::TcpStream::connect(proxy).await.unwrap();
+        s.write_all(
+            b"CONNECT unreachable.invalid:443 HTTP/1.1\r\nHost: unreachable.invalid:443\r\n\r\n",
+        )
+        .await
+        .unwrap();
+        let mut buf = vec![0u8; 256];
+        let n = s.read(&mut buf).await.unwrap();
+        assert!(String::from_utf8_lossy(&buf[..n]).starts_with("HTTP/1.1 200"));
+
+        let mut roots = rustls::RootCertStore::empty();
+        let der: String = String::from_utf8(ca_pem)
+            .unwrap()
+            .lines()
+            .filter(|l| !l.starts_with("-----"))
+            .collect();
+        use base64::Engine as _;
+        let der = base64::engine::general_purpose::STANDARD
+            .decode(der)
+            .unwrap();
+        roots.add(der.into()).unwrap();
+        let mut tls = rustls::ClientConfig::builder_with_provider(std::sync::Arc::new(
+            rustls::crypto::ring::default_provider(),
+        ))
+        .with_safe_default_protocol_versions()
+        .unwrap()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+        tls.alpn_protocols = vec![b"h2".to_vec()];
+        let conn = tokio_rustls::TlsConnector::from(std::sync::Arc::new(tls));
+        let name = rustls::pki_types::ServerName::try_from("unreachable.invalid").unwrap();
+        let tls = conn
+            .connect(name, s)
+            .await
+            .expect("poignée de main interceptée");
+        assert_eq!(tls.get_ref().1.alpn_protocol(), Some(&b"h2"[..]));
+
+        let (mut send, conn) = hyper::client::conn::http2::handshake(
+            hyper_util::rt::TokioExecutor::new(),
+            hyper_util::rt::TokioIo::new(tls),
+        )
+        .await
+        .unwrap();
+        tokio::spawn(conn);
+        let req = hyper::Request::get("https://unreachable.invalid/")
+            .body(http_body_util::Empty::<bytes::Bytes>::new())
+            .unwrap();
+        let resp = send.send_request(req).await.unwrap();
+        assert_eq!(resp.version(), hyper::Version::HTTP_2);
+        // L'amont n'existe pas : Ferrox répond lui-même, en HTTP/2.
+        assert_eq!(resp.status(), 502);
+    });
 }

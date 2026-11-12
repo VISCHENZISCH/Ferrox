@@ -11,6 +11,10 @@ use std::path::{Path, PathBuf};
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 
+/// Version du schéma ECS suivie par les journaux. Gelée à partir de Ferrox 1.0 :
+/// un changement incompatible de format impose une version majeure.
+pub const ECS_VERSION: &str = "8.11.0";
+
 struct DailyFile {
     prefix: &'static str,
     day: String,
@@ -54,9 +58,110 @@ impl DailyFile {
     }
 }
 
+/// Règles de conservation et de confidentialité, modifiables à chaud.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct LogPolicy {
+    pub retention_days: u32,
+    pub max_total_mb: u64,
+    pub mask_query: bool,
+}
+
+impl LogPolicy {
+    pub fn from_config(cfg: &LogConfig) -> Self {
+        Self {
+            retention_days: cfg.retention_days,
+            max_total_mb: cfg.max_total_mb,
+            mask_query: cfg.mask_query,
+        }
+    }
+}
+
+/// Remplace la valeur de chaque paramètre d'URL par `*` : `/a?q=secret&x` → `/a?q=*&x`.
+/// Le fragment éventuel est retiré.
+pub fn mask_query(path: &str) -> std::borrow::Cow<'_, str> {
+    let Some((base, query)) = path.split_once('?') else {
+        return std::borrow::Cow::Borrowed(path);
+    };
+    let query = query.split('#').next().unwrap_or("");
+    let mut out = String::with_capacity(path.len());
+    out.push_str(base);
+    out.push('?');
+    for (i, kv) in query.split('&').enumerate() {
+        if i > 0 {
+            out.push('&');
+        }
+        match kv.split_once('=') {
+            Some((k, _)) => {
+                out.push_str(k);
+                out.push_str("=*");
+            }
+            None => out.push_str(kv),
+        }
+    }
+    std::borrow::Cow::Owned(out)
+}
+
+/// Date `AAAA-MM-JJ` d'un fichier `traffic-AAAA-MM-JJ.jsonl` ou `alerts-…`.
+fn file_day(name: &str) -> Option<&str> {
+    let stem = name.strip_suffix(".jsonl")?;
+    let day = stem
+        .strip_prefix("traffic-")
+        .or_else(|| stem.strip_prefix("alerts-"))?;
+    (day.len() == 10 && day.as_bytes()[4] == b'-' && day.as_bytes()[7] == b'-').then_some(day)
+}
+
+/// Résultat d'une purge des journaux.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct PurgeReport {
+    pub removed_files: usize,
+    pub removed_bytes: u64,
+}
+
+/// Supprime les journaux plus anciens que la rétention, puis les plus anciens tant que la
+/// taille totale dépasse le plafond. Les fichiers du jour `today` ne sont jamais supprimés.
+pub fn purge_logs(dir: &Path, policy: LogPolicy, today: &str) -> PurgeReport {
+    let mut report = PurgeReport::default();
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return report;
+    };
+    let mut files: Vec<(String, PathBuf, u64)> = rd
+        .filter_map(Result::ok)
+        .filter_map(|e| {
+            let name = e.file_name().to_string_lossy().into_owned();
+            let day = file_day(&name)?.to_string();
+            let len = e.metadata().ok()?.len();
+            Some((day, e.path(), len))
+        })
+        .collect();
+    files.sort();
+    let cutoff = (policy.retention_days > 0).then(|| {
+        let t = OffsetDateTime::now_utc() - time::Duration::days(i64::from(policy.retention_days));
+        t.format(&Rfc3339).unwrap_or_default()[..10].to_string()
+    });
+    let mut total: u64 = files.iter().map(|f| f.2).sum();
+    let max = policy.max_total_mb.saturating_mul(1024 * 1024);
+    for (day, path, len) in &files {
+        if day.as_str() >= today {
+            break;
+        }
+        let too_old = cutoff.as_deref().is_some_and(|c| day.as_str() < c);
+        let too_big = max > 0 && total > max;
+        if !(too_old || too_big) {
+            continue;
+        }
+        if std::fs::remove_file(path).is_ok() {
+            total -= len;
+            report.removed_files += 1;
+            report.removed_bytes += len;
+        }
+    }
+    report
+}
+
 pub struct Logger {
     dir: PathBuf,
     jsonl: bool,
+    policy: LogPolicy,
     traffic: DailyFile,
     alerts: DailyFile,
     syslog: Option<(UdpSocket, SocketAddr)>,
@@ -98,6 +203,7 @@ impl Logger {
         Self {
             dir,
             jsonl: cfg.jsonl,
+            policy: LogPolicy::from_config(cfg),
             traffic: DailyFile::new("traffic"),
             alerts: DailyFile::new("alerts"),
             syslog,
@@ -105,11 +211,39 @@ impl Logger {
         }
     }
 
+    pub fn set_policy(&mut self, policy: LogPolicy) {
+        self.policy = policy;
+    }
+
+    /// Applique la rétention (appelée au démarrage puis toutes les heures).
+    pub fn purge(&mut self) -> PurgeReport {
+        if !self.jsonl {
+            return PurgeReport::default();
+        }
+        self.flush();
+        let (_, today) = ts_parts(crate::event::now_ms());
+        let r = purge_logs(&self.dir, self.policy, &today);
+        if r.removed_files > 0 {
+            tracing::info!(
+                "journaux : {} fichier(s) supprimé(s), {} octets libérés",
+                r.removed_files,
+                r.removed_bytes
+            );
+        }
+        r
+    }
+
     pub fn write_event(&mut self, ev: &Event) {
         if !self.jsonl && self.syslog.is_none() {
             return;
         }
-        let (doc, ms) = ecs_event(ev);
+        let (mut doc, ms) = ecs_event(ev);
+        if self.policy.mask_query {
+            if let Some(path) = doc["url"]["path"].as_str() {
+                let masked = mask_query(path).into_owned();
+                doc["url"]["path"] = Value::String(masked);
+            }
+        }
         self.emit(doc, ms, false);
     }
 
@@ -123,6 +257,14 @@ impl Logger {
     fn emit(&mut self, mut doc: Value, ms: i64, alert: bool) {
         let (iso, day) = ts_parts(ms);
         doc["@timestamp"] = Value::String(iso.clone());
+        doc["ecs"] = json!({ "version": ECS_VERSION });
+        doc["observer"] = json!({
+            "vendor": "Ferrox",
+            "product": "Ferrox",
+            "type": "proxy",
+            "version": env!("CARGO_PKG_VERSION"),
+            "hostname": self.hostname,
+        });
         let line = doc.to_string();
         if self.jsonl {
             let f = if alert {
@@ -218,7 +360,11 @@ fn ecs_alert(a: &Alert) -> Value {
             "id": a.id.to_string(),
             "dataset": "ferrox.alert",
         },
-        "rule": { "name": a.kind, "description": a.kind.label() },
+        "rule": {
+            "id": a.rule.clone().unwrap_or_else(|| a.kind.as_str().to_string()),
+            "name": a.rule_name.clone().unwrap_or_else(|| a.kind.label().to_string()),
+            "category": a.kind.as_str(),
+        },
         "source": { "ip": a.client },
         "message": a.detail,
         "ferrox": { "score": round2(a.score), "severity": a.severity },
@@ -239,6 +385,60 @@ mod tests {
     use crate::event::{AlertKind, Severity};
 
     #[test]
+    fn masks_query_values() {
+        assert_eq!(mask_query("/a?q=secret&x&id=4#f"), "/a?q=*&x&id=*");
+        assert_eq!(mask_query("/plain"), "/plain");
+        assert_eq!(mask_query("/?"), "/?");
+    }
+
+    #[test]
+    fn purge_respects_size_and_today() {
+        let dir = std::env::temp_dir().join(format!("ferrox-purge-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for d in ["2020-01-01", "2020-01-02", "2099-12-31"] {
+            std::fs::write(
+                dir.join(format!("traffic-{d}.jsonl")),
+                vec![b'x'; 600 * 1024],
+            )
+            .unwrap();
+        }
+        std::fs::write(dir.join("notes.txt"), b"keep").unwrap();
+        // Rétention : les fichiers de 2020 sont trop vieux ; le jour courant est gardé.
+        let r = purge_logs(
+            &dir,
+            LogPolicy {
+                retention_days: 30,
+                max_total_mb: 0,
+                mask_query: false,
+            },
+            "2099-12-31",
+        );
+        assert_eq!(r.removed_files, 2);
+        assert!(dir.join("traffic-2099-12-31.jsonl").exists());
+        assert!(dir.join("notes.txt").exists());
+        // Plafond de taille : les plus anciens partent d'abord.
+        for d in ["2098-01-01", "2098-01-02"] {
+            std::fs::write(
+                dir.join(format!("alerts-{d}.jsonl")),
+                vec![b'x'; 600 * 1024],
+            )
+            .unwrap();
+        }
+        let r = purge_logs(
+            &dir,
+            LogPolicy {
+                retention_days: 0,
+                max_total_mb: 1,
+                mask_query: false,
+            },
+            "2099-12-31",
+        );
+        assert_eq!(r.removed_files, 2);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn alert_ecs_fields() {
         let a = Alert {
             id: 1,
@@ -250,6 +450,8 @@ mod tests {
             user_agent: Some("curl/8.0".into()),
             detail: "outil".into(),
             score: 0.3,
+            rule: None,
+            rule_name: None,
         };
         let d = ecs_alert(&a);
         assert_eq!(d["destination"]["domain"], "example.com");

@@ -44,6 +44,16 @@ impl Paths {
             .clone()
             .unwrap_or_else(|| self.data_dir.join("ca"))
     }
+    pub fn rules_file(&self, cfg: &DetectConfig) -> PathBuf {
+        cfg.rules_file
+            .clone()
+            .unwrap_or_else(|| self.data_dir.join("rules.toml"))
+    }
+    pub fn history_file(&self, cfg: &HistoryConfig) -> PathBuf {
+        cfg.path
+            .clone()
+            .unwrap_or_else(|| self.data_dir.join("history.sqlite3"))
+    }
     pub fn categories_dir(&self, cfg: &FilterConfig) -> PathBuf {
         cfg.categories_dir
             .clone()
@@ -60,6 +70,8 @@ pub struct Config {
     pub filter: FilterConfig,
     pub detect: DetectConfig,
     pub log: LogConfig,
+    pub history: HistoryConfig,
+    pub api: ApiConfig,
     pub ui: UiConfig,
 }
 
@@ -101,6 +113,12 @@ impl Config {
             let mut c = c.clone();
             c.detect = DetectConfig::default();
             c.ui = UiConfig::default();
+            // Rétention et masquage : relus à chaud par le pipeline.
+            c.log.retention_days = 0;
+            c.log.max_total_mb = 0;
+            c.log.mask_query = false;
+            c.filter.update_interval_h = 0;
+            c.history.retention_days = 0;
             toml::to_string(&c).unwrap_or_default()
         };
         key(self) != key(next)
@@ -187,6 +205,8 @@ pub enum DnsBlockMode {
 pub struct DnsConfig {
     pub enabled: bool,
     pub listen: String,
+    /// Résolveurs amont : `1.1.1.1:53` (UDP/TCP), `tls://1.1.1.1:853#cloudflare-dns.com`
+    /// (DoT) ou `https://cloudflare-dns.com/dns-query` (DoH).
     pub upstreams: Vec<String>,
     pub block_mode: DnsBlockMode,
     pub cache_entries: usize,
@@ -225,6 +245,8 @@ pub struct TlsConfig {
     pub auto_bypass_failures: u32,
     /// Durée de ce passage en tunnel direct, en secondes.
     pub auto_bypass_ttl_s: u64,
+    /// Durée de validité de la CA créée, en jours (régénérable avec `ferroxd ca --renew`).
+    pub ca_validity_days: u32,
 }
 
 impl Default for TlsConfig {
@@ -234,6 +256,7 @@ impl Default for TlsConfig {
             ca_dir: None,
             auto_bypass_failures: 3,
             auto_bypass_ttl_s: 3600,
+            ca_validity_days: 825,
             bypass: vec![
                 "apple.com".into(),
                 "icloud.com".into(),
@@ -270,6 +293,8 @@ pub struct FilterConfig {
     pub blocked_mime: Vec<String>,
     /// Inspecte les premiers octets des réponses (signatures de fichiers).
     pub sniff_magic: bool,
+    /// Mise à jour automatique des listes toutes les N heures (0 : jamais).
+    pub update_interval_h: u64,
 }
 
 impl Default for FilterConfig {
@@ -303,6 +328,7 @@ impl Default for FilterConfig {
             blocked_extensions: vec![],
             blocked_mime: vec![],
             sniff_magic: true,
+            update_interval_h: 24,
         }
     }
 }
@@ -443,6 +469,9 @@ pub struct DetectConfig {
     pub exfil: ExfilConfig,
     pub user_agent: UaConfig,
     pub dns: DnsDetectConfig,
+    /// Fichier de règles de détection TOML (rechargé à chaud). Vide : `rules.toml` du dossier
+    /// de données, s'il existe.
+    pub rules_file: Option<PathBuf>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -452,6 +481,13 @@ pub struct LogConfig {
     pub jsonl: bool,
     /// Envoi syslog UDP (RFC 5424, charge JSON) vers un SIEM : "hôte:port".
     pub syslog: Option<String>,
+    /// Durée de conservation des fichiers de journaux, en jours (0 : sans limite).
+    pub retention_days: u32,
+    /// Taille totale maximale des journaux, en Mio (0 : sans limite) ; les plus anciens
+    /// fichiers sont supprimés en premier.
+    pub max_total_mb: u64,
+    /// Remplace les valeurs des paramètres d'URL par « * » (`?q=*&id=*`).
+    pub mask_query: bool,
 }
 
 impl Default for LogConfig {
@@ -460,6 +496,53 @@ impl Default for LogConfig {
             dir: None,
             jsonl: true,
             syslog: None,
+            retention_days: 30,
+            max_total_mb: 2048,
+            mask_query: false,
+        }
+    }
+}
+
+/// Historique persistant (SQLite) des statistiques par minute et des alertes.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(default)]
+pub struct HistoryConfig {
+    pub enabled: bool,
+    /// Fichier de base ; vide : `history.sqlite3` du dossier de données.
+    pub path: Option<PathBuf>,
+    /// Conservation en jours.
+    pub retention_days: u32,
+}
+
+impl Default for HistoryConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            path: None,
+            retention_days: 30,
+        }
+    }
+}
+
+/// API locale en lecture seule : instantané, alertes, historique et `/metrics` (Prometheus).
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(default)]
+pub struct ApiConfig {
+    pub enabled: bool,
+    pub listen: String,
+    /// Réseaux clients autorisés (CIDR). Vide : boucle locale seulement.
+    pub allow: Vec<String>,
+    /// Jeton exigé dans `Authorization: Bearer …` (facultatif).
+    pub token: Option<String>,
+}
+
+impl Default for ApiConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            listen: "127.0.0.1:9898".into(),
+            allow: default_allow(),
+            token: None,
         }
     }
 }

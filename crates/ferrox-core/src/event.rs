@@ -75,7 +75,9 @@ pub struct DnsEvent {
     pub category: Option<String>,
 }
 
-#[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Serialize, serde::Deserialize, Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum Severity {
     Low,
@@ -105,6 +107,8 @@ pub enum AlertKind {
     DnsTunnel,
     DnsNxStorm,
     ThreatBlocked,
+    /// Règle décrite dans le fichier de règles TOML.
+    Rule,
 }
 
 impl AlertKind {
@@ -117,7 +121,62 @@ impl AlertKind {
             AlertKind::DnsTunnel => "Tunnel DNS",
             AlertKind::DnsNxStorm => "Rafale NXDOMAIN",
             AlertKind::ThreatBlocked => "Menace bloquée",
+            AlertKind::Rule => "Règle personnalisée",
         }
+    }
+
+    /// Identifiant stable (journaux ECS, API).
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            AlertKind::Beacon => "beacon",
+            AlertKind::Exfiltration => "exfiltration",
+            AlertKind::SuspiciousUserAgent => "suspicious_user_agent",
+            AlertKind::DnsDga => "dns_dga",
+            AlertKind::DnsTunnel => "dns_tunnel",
+            AlertKind::DnsNxStorm => "dns_nx_storm",
+            AlertKind::ThreatBlocked => "threat_blocked",
+            AlertKind::Rule => "rule",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|k| k.as_str() == s)
+    }
+
+    pub const ALL: [AlertKind; 8] = [
+        AlertKind::Beacon,
+        AlertKind::Exfiltration,
+        AlertKind::SuspiciousUserAgent,
+        AlertKind::DnsDga,
+        AlertKind::DnsTunnel,
+        AlertKind::DnsNxStorm,
+        AlertKind::ThreatBlocked,
+        AlertKind::Rule,
+    ];
+}
+
+impl Severity {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Severity::Low => "low",
+            Severity::Medium => "medium",
+            Severity::High => "high",
+            Severity::Critical => "critical",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.to_ascii_lowercase().as_str() {
+            "low" | "faible" => Some(Severity::Low),
+            "medium" | "moyenne" => Some(Severity::Medium),
+            "high" | "haute" => Some(Severity::High),
+            "critical" | "critique" => Some(Severity::Critical),
+            _ => None,
+        }
+    }
+
+    pub fn index(&self) -> usize {
+        *self as usize
     }
 }
 
@@ -134,6 +193,12 @@ pub struct Alert {
     pub user_agent: Option<String>,
     pub detail: String,
     pub score: f32,
+    /// Identifiant de la règle TOML à l'origine de l'alerte.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rule: Option<String>,
+    /// Nom lisible de cette règle.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rule_name: Option<String>,
 }
 
 #[derive(Clone, Debug)]

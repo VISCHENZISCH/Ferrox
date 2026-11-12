@@ -58,6 +58,8 @@ pub struct ProxyCtx {
     /// Octets relayés, montant et descendant, comptés au fil de l'eau.
     pub live_up: Arc<AtomicU64>,
     pub live_down: Arc<AtomicU64>,
+    /// Adresse annoncée dans le fichier PAC quand l'en-tête Host manque.
+    pub pac_fallback: String,
 }
 
 impl ProxyCtx {
@@ -145,6 +147,27 @@ where
                 tokio::time::sleep(Duration::from_millis(50)).await;
             }
         }
+    }
+}
+
+/// Session HTTP/2 d'un client intercepté (ALPN « h2 »).
+async fn serve_h2<S>(io: S, client: IpAddr, ctx: Arc<ProxyCtx>, mode: Mode)
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let svc_ctx = ctx.clone();
+    let svc = service_fn(move |req: Request<Incoming>| {
+        let ctx = svc_ctx.clone();
+        let mode = mode.clone();
+        async move { Ok::<_, Infallible>(handle(req, client, ctx, mode).await) }
+    });
+    let conn = hyper::server::conn::http2::Builder::new(hyper_util::rt::TokioExecutor::new())
+        .timer(TokioTimer::new())
+        .max_concurrent_streams(256)
+        .keep_alive_interval(Some(Duration::from_secs(30)))
+        .serve_connection(TokioIo::new(io), svc);
+    if let Err(e) = conn.await {
+        tracing::debug!("connexion h2 {client} : {e}");
     }
 }
 
@@ -240,6 +263,38 @@ fn block_page(host: &str, r: &BlockReason) -> Response<ProxyBody> {
         .unwrap()
 }
 
+/// Script PAC : tout passe par Ferrox, sauf les noms locaux. Pas de repli « DIRECT » :
+/// si le proxy tombe, la navigation s'arrête au lieu d'échapper au filtrage.
+pub fn pac_script(proxy: &str) -> String {
+    format!(
+        "// Ferrox {ver} : configuration automatique du proxy\n\
+function FindProxyForURL(url, host) {{\n\
+  if (isPlainHostName(host) || host === \"localhost\" || shExpMatch(host, \"*.local\") ||\n\
+      shExpMatch(host, \"127.*\") || host === \"[::1]\" || host === \"::1\") {{\n\
+    return \"DIRECT\";\n\
+  }}\n\
+  return \"PROXY {proxy}\";\n\
+}}\n",
+        ver = env!("CARGO_PKG_VERSION"),
+    )
+}
+
+/// Adresse du proxy annoncée dans le PAC : l'en-tête Host reçu (ce que le poste sait
+/// joindre), sinon l'adresse d'écoute.
+fn pac_response(host: &str, fallback: &str) -> Response<ProxyBody> {
+    let valid = !host.is_empty()
+        && host
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b".-:[]".contains(&b));
+    let proxy = if valid { host } else { fallback };
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "application/x-ns-proxy-autoconfig")
+        .header(header::CACHE_CONTROL, "max-age=300")
+        .body(full(pac_script(proxy)))
+        .unwrap()
+}
+
 fn auth_required() -> Response<ProxyBody> {
     Response::builder()
         .status(StatusCode::PROXY_AUTHENTICATION_REQUIRED)
@@ -314,6 +369,16 @@ async fn handle(
     ctx: Arc<ProxyCtx>,
     mode: Mode,
 ) -> Response<ProxyBody> {
+    // Fichier PAC : demandé directement au proxy (forme d'origine), sans authentification,
+    // comme le font les navigateurs.
+    if matches!(mode, Mode::Explicit)
+        && req.uri().scheme().is_none()
+        && req.method() == Method::GET
+        && matches!(req.uri().path(), "/proxy.pac" | "/wpad.dat")
+    {
+        let host = header_str(req.headers(), header::HOST).unwrap_or_default();
+        return pac_response(&host, &ctx.pac_fallback);
+    }
     // Authentification du proxy explicite (les requêtes interceptées l'ont déjà passée au CONNECT).
     if let (Mode::Explicit, Some(auth)) = (&mode, &ctx.auth) {
         let h = req.headers().get(header::PROXY_AUTHORIZATION);
@@ -697,13 +762,15 @@ where
         let acceptor = tokio_rustls::TlsAcceptor::from(ca.server_config(&host));
         match tokio::time::timeout(Duration::from_secs(10), acceptor.accept(io)).await {
             Ok(Ok(tls)) => {
-                let sni = tls
-                    .get_ref()
-                    .1
-                    .server_name()
-                    .map(normalize_host)
-                    .unwrap_or(host);
-                serve_http(tls, client, ctx, Mode::Mitm { host: sni, port }).await;
+                let session = tls.get_ref().1;
+                let sni = session.server_name().map(normalize_host).unwrap_or(host);
+                let h2 = session.alpn_protocol() == Some(b"h2");
+                let mode = Mode::Mitm { host: sni, port };
+                if h2 {
+                    serve_h2(tls, client, ctx, mode).await;
+                } else {
+                    serve_http(tls, client, ctx, mode).await;
+                }
             }
             other => {
                 // Certificat refusé (épinglage, CA non installée) : après plusieurs échecs,
@@ -723,8 +790,32 @@ where
 
 // ---------------------------------------------------------------- transparent HTTPS
 
+/// Port de destination d'origine d'une connexion redirigée (iptables REDIRECT) ;
+/// 443 si le système ne le donne pas.
+fn original_port(stream: &TcpStream) -> u16 {
+    #[cfg(target_os = "linux")]
+    {
+        let sock = socket2::SockRef::from(stream);
+        let local = stream.local_addr().ok();
+        let orig = if local.is_some_and(|a| a.is_ipv6()) {
+            sock.original_dst_v6()
+        } else {
+            sock.original_dst_v4()
+        };
+        if let Some(port) = orig.ok().and_then(|a| a.as_socket()).map(|a| a.port()) {
+            // Sans redirection, la « destination d'origine » est l'écouteur lui-même.
+            if local.map(|l| l.port()) != Some(port) {
+                return port;
+            }
+        }
+    }
+    let _ = stream;
+    443
+}
+
 async fn transparent_tls(mut stream: TcpStream, client: IpAddr, ctx: Arc<ProxyCtx>) {
     let start = Instant::now();
+    let port = original_port(&stream);
     let mut buf = Vec::with_capacity(2048);
     let mut chunk = [0u8; 4096];
     let host = loop {
@@ -743,19 +834,19 @@ async fn transparent_tls(mut stream: TcpStream, client: IpAddr, ctx: Arc<ProxyCt
         }
     };
     let host = normalize_host(&host);
-    let ev = base_event(client, "TLS", Scheme::Tunnel, &host, 443);
+    let ev = base_event(client, "TLS", Scheme::Tunnel, &host, port);
 
     if let Some(r) = ctx.filter.load().check_domain(&host) {
         emit_now(&ctx, ev, 403, Some(&r), start);
         return;
     }
-    if ctx.should_mitm(&host, 443) {
-        mitm(sni::Prefixed::new(buf, stream), client, host, 443, ev, ctx).await;
+    if ctx.should_mitm(&host, port) {
+        mitm(sni::Prefixed::new(buf, stream), client, host, port, ev, ctx).await;
         return;
     }
     let upstream = match tokio::time::timeout(
         ctx.connect_timeout,
-        TcpStream::connect((host.as_str(), 443)),
+        TcpStream::connect((host.as_str(), port)),
     )
     .await
     {
@@ -781,6 +872,17 @@ async fn transparent_tls(mut stream: TcpStream, client: IpAddr, ctx: Arc<ProxyCt
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn pac_routes_through_proxy() {
+        let pac = pac_script("10.0.0.1:3128");
+        assert!(pac.contains("PROXY 10.0.0.1:3128"));
+        assert!(pac.contains("function FindProxyForURL"));
+        assert!(!pac.contains("; DIRECT"));
+        // Un Host forgé n'est pas recopié dans le script.
+        let r = pac_response("evil\"; alert(1)", "127.0.0.1:3128");
+        assert_eq!(r.status(), StatusCode::OK);
+    }
+
     #[test]
     fn authority() {
         assert_eq!(

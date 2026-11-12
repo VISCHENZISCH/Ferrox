@@ -75,6 +75,25 @@ pub struct UpdateResult {
     pub ok: bool,
     pub domains: usize,
     pub message: String,
+    /// Heure de la tentative (ms depuis l'époque Unix).
+    pub ts: i64,
+}
+
+/// Date de dernière mise à jour réussie d'une liste (heure de modification du fichier).
+pub fn list_updated_at(paths: &Paths, name: &str) -> Option<i64> {
+    let file = paths.lists_dir().join(format!("{}.txt", safe_name(name)));
+    let m = std::fs::metadata(file).ok()?.modified().ok()?;
+    let d = m.duration_since(std::time::UNIX_EPOCH).ok()?;
+    i64::try_from(d.as_millis()).ok()
+}
+
+/// Vrai si une liste activée est absente ou plus vieille que `interval_h` heures.
+pub fn lists_stale(cfg: &FilterConfig, paths: &Paths, interval_h: u64, now_ms: i64) -> bool {
+    let max_age = i64::try_from(interval_h.saturating_mul(3_600_000)).unwrap_or(i64::MAX);
+    cfg.lists
+        .iter()
+        .filter(|s| s.enabled)
+        .any(|s| list_updated_at(paths, &s.name).is_none_or(|t| now_ms - t >= max_age))
 }
 
 const MAX_LIST_BYTES: usize = 64 * 1024 * 1024;
@@ -110,12 +129,14 @@ pub async fn update_lists(cfg: &FilterConfig, paths: &Paths) -> Vec<UpdateResult
     crate::install_crypto_provider();
     let client: HttpsClient = http_client::build();
     let dir = paths.lists_dir();
+    let ts = crate::event::now_ms();
     if let Err(e) = tokio::fs::create_dir_all(&dir).await {
         return vec![UpdateResult {
             name: "*".into(),
             ok: false,
             domains: 0,
             message: format!("dossier {} : {e}", dir.display()),
+            ts,
         }];
     }
     let mut results = Vec::new();
@@ -133,6 +154,7 @@ pub async fn update_lists(cfg: &FilterConfig, paths: &Paths) -> Vec<UpdateResult
                         ok: true,
                         domains: n,
                         message: format!("{n} domaines"),
+                        ts,
                     },
                     Err(e) => UpdateResult {
                         name: src.name.clone(),
@@ -143,6 +165,7 @@ pub async fn update_lists(cfg: &FilterConfig, paths: &Paths) -> Vec<UpdateResult
                         } else {
                             format!("écriture : {e}")
                         },
+                        ts,
                     },
                 }
             }
@@ -151,6 +174,7 @@ pub async fn update_lists(cfg: &FilterConfig, paths: &Paths) -> Vec<UpdateResult
                 ok: false,
                 domains: 0,
                 message: e.to_string(),
+                ts,
             },
         };
         results.push(r);
@@ -173,6 +197,31 @@ mod tests {
         assert!(!dir.join("t.txt.tmp").exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
+    #[test]
+    fn stale_when_missing_or_old() {
+        let dir = std::env::temp_dir().join(format!("ferrox-stale-{}", std::process::id()));
+        let paths = Paths {
+            config_file: dir.join("c.toml"),
+            data_dir: dir.clone(),
+        };
+        std::fs::create_dir_all(paths.lists_dir()).unwrap();
+        let cfg = FilterConfig::default();
+        let now = crate::event::now_ms();
+        assert!(lists_stale(&cfg, &paths, 24, now));
+        for s in cfg.lists.iter().filter(|s| s.enabled) {
+            std::fs::write(
+                paths
+                    .lists_dir()
+                    .join(format!("{}.txt", safe_name(&s.name))),
+                "a.com",
+            )
+            .unwrap();
+        }
+        assert!(!lists_stale(&cfg, &paths, 24, now));
+        assert!(lists_stale(&cfg, &paths, 24, now + 25 * 3_600_000));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn formats() {
         let t = "# c\n0.0.0.0 bad.com\n127.0.0.1 localhost\nplain.org\n||ads.net^\n||x.com/path\n! adblock\n*.wild.io\n1.2.3.4\nhttp://Evil.example:8080/a/b.exe\n";

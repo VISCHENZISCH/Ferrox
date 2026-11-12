@@ -1,0 +1,78 @@
+# Règles de détection Ferrox.
+#
+# Ce fichier est relu automatiquement quelques secondes après chaque modification
+# (ferroxd recharge aussi sur SIGHUP). Une erreur de syntaxe laisse les règles
+# précédentes en place et s'affiche dans l'interface et les journaux du service.
+#
+# Chaque [[rule]] décrit une alerte :
+#   id          identifiant stable (rule.id dans les journaux ECS)
+#   name        nom affiché (rule.name)
+#   description texte de l'alerte (facultatif, le nom sinon)
+#   severity    low, medium, high ou critical
+#   source      http, dns ou any (défaut)
+#   enabled     true (défaut) ou false
+#   cooldown_s  silence après une alerte, par client et règle (600 par défaut)
+#
+# [rule.match] : toutes les conditions présentes doivent être vraies ; dans une liste,
+# une valeur suffit. Les motifs acceptent * et ? et ignorent la casse. Un domaine sans
+# joker couvre aussi ses sous-domaines.
+#   host, path, user_agent, method, port, status, qtype, rcode, category,
+#   client (réseaux CIDR), action ("allow" ou "block"),
+#   min_bytes_up, min_bytes_down, min_qname_len
+#
+# [rule.threshold] (facultatif) : l'alerte part quand `count` événements arrivent en
+# `window_s` secondes, par client (group_by = "client"), par client et hôte
+# ("client_host") ou par hôte ("host"). Avec `distinct`, on compte des valeurs
+# différentes : host, path, qname ou user_agent.
+
+[[rule]]
+id = "script-download"
+name = "Script téléchargé par un interpréteur"
+description = "Un interpréteur de commandes a téléchargé un script"
+severity = "high"
+source = "http"
+[rule.match]
+user_agent = ["*powershell*", "*certutil*", "*bitsadmin*", "*python-requests*", "curl/*", "wget/*"]
+path = ["*.ps1", "*.psm1", "*.vbs", "*.hta", "*.sh", "*.bat"]
+
+[[rule]]
+id = "paste-site"
+name = "Accès à un site de partage de texte"
+description = "Les sites de partage de texte servent souvent à héberger des charges"
+severity = "low"
+cooldown_s = 3600
+[rule.match]
+host = ["pastebin.com", "paste.ee", "hastebin.com", "ghostbin.co", "transfer.sh"]
+
+[[rule]]
+id = "doh-bypass"
+name = "Résolveur DoH public contacté"
+description = "Un poste contourne peut-être le DNS de Ferrox par DNS sur HTTPS"
+severity = "medium"
+cooldown_s = 3600
+[rule.match]
+host = ["dns.google", "cloudflare-dns.com", "mozilla.cloudflare-dns.com", "dns.quad9.net", "doh.opendns.com"]
+
+[[rule]]
+id = "host-sweep"
+name = "Balayage de nombreux sites"
+description = "Un client a contacté beaucoup de domaines différents en peu de temps"
+severity = "medium"
+source = "any"
+[rule.threshold]
+count = 150
+window_s = 60
+group_by = "client"
+distinct = "host"
+
+[[rule]]
+id = "blocked-burst"
+name = "Rafale de blocages"
+description = "Un client accumule les accès bloqués"
+severity = "high"
+[rule.match]
+action = "block"
+[rule.threshold]
+count = 20
+window_s = 60
+group_by = "client"

@@ -1,4 +1,7 @@
-//! Serveur DNS intégré : filtrage, cache, relais vers les résolveurs amont (UDP et TCP).
+//! Serveur DNS intégré : filtrage, cache, relais vers les résolveurs amont
+//! (UDP, TCP, DNS sur TLS, DNS sur HTTPS).
+
+pub mod upstream;
 
 use crate::access::{client_allowed, Cidr};
 use crate::config::DnsBlockMode;
@@ -14,6 +17,7 @@ use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::sync::Semaphore;
+use upstream::Upstream;
 
 /// Délai pour lire un message DNS complet sur TCP (RFC 7766).
 const TCP_READ_TIMEOUT: Duration = Duration::from_secs(10);
@@ -28,7 +32,7 @@ struct CacheEntry {
 pub struct DnsCtx {
     pub filter: Arc<Filter>,
     pub sink: EventSink,
-    pub upstreams: Vec<SocketAddr>,
+    pub upstreams: Vec<Upstream>,
     pub block_mode: DnsBlockMode,
     pub cache_max: usize,
     pub timeout: Duration,
@@ -37,27 +41,37 @@ pub struct DnsCtx {
     /// Plafond de connexions TCP simultanées.
     pub max_tcp_clients: usize,
     cache: DashMap<(Box<str>, u16), CacheEntry>,
+    tls: tokio_rustls::TlsConnector,
+    https: crate::http_client::HttpsClient,
 }
 
 impl DnsCtx {
     pub fn new(
         filter: Arc<Filter>,
         sink: EventSink,
-        upstreams: Vec<SocketAddr>,
+        upstreams: Vec<upstream::UpstreamKind>,
         block_mode: DnsBlockMode,
         cache_max: usize,
         timeout: Duration,
     ) -> Self {
+        let encrypted = upstreams
+            .iter()
+            .any(|u| !matches!(u, upstream::UpstreamKind::Plain(_)));
+        if encrypted {
+            crate::install_crypto_provider();
+        }
         Self {
             filter,
             sink,
-            upstreams,
+            upstreams: upstreams.into_iter().map(Upstream::new).collect(),
             block_mode,
             cache_max,
             timeout,
             allow: crate::access::loopback(),
             max_tcp_clients: 256,
             cache: DashMap::new(),
+            tls: upstream::dot_connector(),
+            https: upstream::doh_client(),
         }
     }
 
@@ -261,13 +275,27 @@ async fn resolve(
     // Relais amont.
     let mut resp = None;
     for up in &ctx.upstreams {
-        let r = match transport {
-            Transport::Udp => forward_udp(pkt, req.queries(), *up, ctx.timeout).await,
-            Transport::Tcp => forward_tcp(pkt, *up, ctx.timeout).await,
+        let r = match (up.plain_addr(), transport) {
+            (Some(a), Transport::Udp) => forward_udp(pkt, req.queries(), a, ctx.timeout).await,
+            (Some(a), Transport::Tcp) => forward_tcp(pkt, a, ctx.timeout).await,
+            (None, _) => up
+                .exchange_encrypted(pkt, &ctx.tls, &ctx.https, ctx.timeout)
+                .await
+                .and_then(|r| {
+                    // Même contrôle que pour l'UDP : identifiant et question.
+                    if matches_query(&r, pkt, req.queries()) {
+                        Ok(r)
+                    } else {
+                        Err(std::io::Error::other("réponse DoT/DoH sans rapport"))
+                    }
+                }),
         };
-        if let Ok(r) = r {
-            resp = Some(r);
-            break;
+        match r {
+            Ok(r) => {
+                resp = Some(r);
+                break;
+            }
+            Err(e) => tracing::debug!("DNS amont {} : {e}", up.kind),
         }
     }
     let Some(bytes) = resp else {
@@ -314,6 +342,13 @@ async fn resolve(
         }
         Err(_) => (ResponseCode::FormErr, 0),
     };
+    if transport == Transport::Udp && bytes.len() > udp_limit {
+        // Réponse DoT/DoH trop grande pour ce client UDP : TC=1, il réessaiera en TCP.
+        let mut m = reply_base(&req);
+        m.set_truncated(true);
+        finish(ev, rcode, 0);
+        return m.to_vec().ok();
+    }
     finish(ev, rcode, answers);
     Some(bytes)
 }
